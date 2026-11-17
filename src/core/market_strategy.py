@@ -47,7 +47,7 @@ class MarketStrategyBlueprint:
     def to_markdown_block(self) -> str:
         """Render blueprint as markdown section for template fallback report."""
         dims = "\n".join([f"- **{dim.name}**: {dim.objective}" for dim in self.dimensions])
-        section_title = "### VI. Strategy Framework" if self.region == "us" else "### 六、策略框架"
+        section_title = "### 六、策略檢核框架"
         return f"{section_title}\n{dims}\n"
 
 

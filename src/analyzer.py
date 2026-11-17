@@ -2739,11 +2739,15 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
 """
         return base_prompt + """
 
-## 输出语言（最高优先级）
+## 輸出語言、新手友善白話解讀與台灣金融慣用語規範（最高優先級）
 
-- 所有 JSON 键名保持不变。
-- `decision_type` 必须保持为 `buy|hold|sell`。
-- 所有面向用户的人类可读文本值必须使用中文。
+- 所有 JSON 鍵名保持不變。
+- `decision_type` 必須保持為 `buy|hold|sell`。
+- `operation_advice` 必須使用繁體中文「**買入**」、「**持有**」或「**賣出**」三選一。
+- 最終信心分數 `sentiment_score`（0～100 整數）必須依據「**35% 財報基本面 + 25% 技術位階 + 20% 籌碼總經 + 20% AI 新聞一致性**」加權產出。
+- **新手友善白話解釋技術指標意義**：在分析報告與 `dashboard` 欄位中，提及均線（MA5/MA20/MA60/MA240）、乖離率、ATR 波動度、本益比、殖利率分位或營業現金流比率時，必須用**投資新手易懂的白話解釋其意義**（例如：「MA20 月線代表近一個月市場平均買進成本，站上代表短線支撐穩健」、「ATR 代表股價每日平均震盪幅度，用來設定不易被洗出場的停損位」）。
+- **固定附上保守的分批進場資金比例建議**：在 `dashboard.battle_plan.position_strategy.entry_plan` 與操作指引中，必須固定附上保守的分批進場資金比例建議（例如：「**首波試單 30% 資金（於第一買點順勢拉回建立基本部位）➔ 第二波加碼 40% 資金（待 5 日均線走平翻揚且近 3 日收盤未破底確認止跌後投入）➔ 保留 30% 機動現金（突破加碼或極端行情備用），單筆最大虧損嚴格限制在買入參考價往下 8% 以內**」）。
+- 所有面向使用者的文字值必須全面使用**繁體中文（zh-TW，台灣金融慣用語：本益比、股價淨值比、殖利率、三大法人、外資、投信、自營商、停利、停損、部位、拉回支撐）**，嚴禁出現簡體字或大陸 A 股術語（如北向資金、龍虎榜、市盈率、止損、倉位）。
 """
 
     def _has_channel_config(self, config: Config) -> bool:
@@ -4130,25 +4134,25 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                 report_language=report_language,
             )
 
-        # 如果模型不可用，返回默认结果
+        # 如果模型不可用，返回默认结果（若具備 quant_evaluation 則注入客觀量化算價與基礎信心分數）
         if not self.is_available():
-            return AnalysisResult(
+            fallback_res = AnalysisResult(
                 code=code,
                 name=name,
                 sentiment_score=50,
-                trend_prediction=localize_trend_prediction('震荡', report_language),
+                trend_prediction=localize_trend_prediction('震盪', report_language),
                 operation_advice=localize_operation_advice('持有', report_language),
-                confidence_level=localize_confidence_level('低', report_language),
+                confidence_level=localize_confidence_level('中', report_language),
                 analysis_summary=_localized_text(
                     report_language,
                     en='AI analysis is unavailable because no API key is configured.',
-                    zh='AI 分析功能未启用（未配置 API Key）',
+                    zh='雙軌量化引擎已完成客觀算價與財報趨勢評估（未設定 LLM API Key，採用量化基礎決策）',
                     ko='API 키가 설정되지 않아 AI 분석을 사용할 수 없습니다.',
                 ),
                 risk_warning=_localized_text(
                     report_language,
                     en='Configure an LLM API key (GEMINI_API_KEY/ANTHROPIC_API_KEY/OPENAI_API_KEY) and retry.',
-                    zh='请配置 LLM API Key（GEMINI_API_KEY/ANTHROPIC_API_KEY/OPENAI_API_KEY）后重试',
+                    zh='請於 .env 設定 LLM API Key（GEMINI_API_KEY/ANTHROPIC_API_KEY/OPENAI_API_KEY）以啟用 AI 新聞綜合研判',
                     ko='LLM API 키(GEMINI_API_KEY/ANTHROPIC_API_KEY/OPENAI_API_KEY)를 설정한 뒤 다시 시도하세요.',
                 ),
                 success=False,
@@ -4161,6 +4165,8 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                 model_used=None,
                 report_language=report_language,
             )
+            self._apply_quant_evaluation_enrichment(fallback_res, context.get("quant_evaluation"))
+            return fallback_res
         
         try:
             # 格式化输入（包含技术面数据和新闻）
@@ -4278,6 +4284,7 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                 result.model_used = model_used
                 result.report_language = report_language
                 normalize_chip_structure_availability(result, context.get("chip"))
+                self._apply_quant_evaluation_enrichment(result, context.get("quant_evaluation"))
 
                 # 内容完整性校验（可选）
                 if not config.report_integrity_enabled:
@@ -4350,6 +4357,96 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                 report_language=report_language,
             )
     
+    @staticmethod
+    def _apply_quant_evaluation_enrichment(
+        result: "AnalysisResult",
+        quant_eval: Optional[Dict[str, Any]],
+    ) -> None:
+        """Bind objective QuantEvaluator pricing and 35/25/20/20 weighted confidence score into AnalysisResult."""
+        if result is None or not isinstance(quant_eval, dict) or not quant_eval.get("symbol"):
+            return
+
+        from engine.quant_evaluator import compute_weighted_confidence_score
+
+        dash = result.dashboard if isinstance(result.dashboard, dict) else {}
+        dash["quant_evaluation"] = dict(quant_eval)
+
+        sig_attr = dash.get("signal_attribution") if isinstance(dash.get("signal_attribution"), dict) else {}
+        ai_news_raw = sig_attr.get("news_sentiment")
+        if isinstance(ai_news_raw, (int, float)) and 0 <= float(ai_news_raw) <= 100:
+            ai_news_score = float(ai_news_raw)
+        elif result.sentiment_score is not None and result.model_used:
+            ai_news_score = float(result.sentiment_score)
+        else:
+            ai_news_score = float(quant_eval.get("ai_news_score_default", 50.0))
+
+        f_score = float(quant_eval.get("fundamental_score", 50.0))
+        t_score = float(quant_eval.get("technical_score", 50.0))
+        c_score = float(quant_eval.get("chip_macro_score", 50.0))
+        prem_flag = bool(quant_eval.get("etf_premium_risk_flag", False))
+
+        final_score, final_advice = compute_weighted_confidence_score(
+            fundamental_score=f_score,
+            technical_score=t_score,
+            chip_macro_score=c_score,
+            ai_news_score=ai_news_score,
+            etf_premium_risk_flag=prem_flag,
+        )
+
+        result.sentiment_score = final_score
+        result.operation_advice = final_advice
+        result.decision_type = (
+            "buy" if final_advice == "買入" else ("sell" if final_advice == "賣出" else "hold")
+        )
+        if prem_flag:
+            prem_pct = quant_eval.get("etf_premium_discount_pct")
+            reason_msg = f"台股 ETF 即時溢價率 ({prem_pct}%) 超過 1.5% 警戒線，強制降級買入建議為持有"
+            intel = dash.setdefault("intelligence", {})
+            if isinstance(intel, dict):
+                alerts = list(intel.get("risk_alerts") or [])
+                if not any("溢價" in str(a) for a in alerts):
+                    alerts.insert(0, reason_msg)
+                intel["risk_alerts"] = alerts
+
+        currency = quant_eval.get("currency", "TWD")
+        battle = dash.setdefault("battle_plan", {})
+        if isinstance(battle, dict):
+            sniper = battle.setdefault("sniper_points", {})
+            if isinstance(sniper, dict):
+                sniper["ideal_buy"] = f"{quant_eval.get('buy_point_1', 'N/A')} {currency}"
+                sniper["secondary_buy"] = f"{quant_eval.get('buy_point_2', 'N/A')} {currency}"
+                sniper["stop_loss"] = f"{quant_eval.get('dynamic_stop_loss', 'N/A')} {currency}"
+                sniper["take_profit"] = f"{quant_eval.get('swing_take_profit', 'N/A')} {currency}"
+
+            pos_strat = battle.setdefault("position_strategy", {})
+            if isinstance(pos_strat, dict):
+                pos_strat.setdefault(
+                    "suggested_position",
+                    "首波試單 30% 資金（分批最高 70%，保留 30% 機動現金）",
+                )
+                pos_strat["entry_plan"] = (
+                    quant_eval.get("position_sizing_advice")
+                    or "首波試單 30% 資金（於第一買點順勢拉回建立基本部位）➔ 第二波加碼 40% 資金（待 5 日均線走平翻揚且近 3 日收盤未破底確認止跌後投入）➔ 保留 30% 機動現金"
+                )
+                pos_strat["risk_control"] = (
+                    f"移動停損價設於 {quant_eval.get('dynamic_stop_loss', 'N/A')} {currency} "
+                    f"（取『近20日高點-2.5×ATR = {quant_eval.get('atr_stop_loss', 'N/A')}』與"
+                    f"『買入參考價往下 8% = {quant_eval.get('hard_cap_stop_loss', 'N/A')}』較高者，單筆最大風險不超過 8%）；"
+                    f"{quant_eval.get('buy_point_2_status', '')}"
+                )
+
+        dash["signal_attribution"] = {
+            "fundamentals": int(round(f_score)),
+            "technical_indicators": int(round(t_score)),
+            "market_conditions": int(round(c_score)),
+            "news_sentiment": int(round(ai_news_score)),
+            "strongest_bullish_signal": sig_attr.get("strongest_bullish_signal") or "雙軌量化估值與均線支撐",
+            "strongest_bearish_signal": sig_attr.get("strongest_bearish_signal") or (
+                "台股 ETF 溢價過高風險 (>1.5%)" if prem_flag else "ATR 波動停損風控約束"
+            ),
+        }
+        result.dashboard = dash
+
     def _format_prompt(
         self, 
         context: Dict[str, Any], 
@@ -4464,6 +4561,11 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
             prompt += market_structure_section
         if isinstance(analysis_context_pack_summary, str) and analysis_context_pack_summary:
             prompt += analysis_context_pack_summary
+
+        from engine.quant_evaluator import format_quant_evaluation_prompt_block
+        quant_block = format_quant_evaluation_prompt_block(context.get("quant_evaluation"))
+        if quant_block:
+            prompt += quant_block
         if english:
             prompt += f"""
 

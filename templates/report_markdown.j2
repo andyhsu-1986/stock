@@ -81,6 +81,31 @@
 
 {{ market_snapshot(result) }}
 
+{% set quant_eval = dashboard.get('quant_evaluation') or {} %}
+{% if quant_eval and quant_eval.get('symbol') %}
+### 📐 雙軌量化算價與財報趨勢透視
+
+| 項目 | 量化計算價位 / 指標 | 說明 |
+|------|------|------|
+| 🎯 **第一買點（順勢拉回）** | **{{ quant_eval.get('buy_point_1', 'N/A') }} {{ quant_eval.get('currency', '') }}** | MA20 ({{ quant_eval.get('ma20', 'N/A') }}) 與估值區間定錨（建議首波試單 30% 資金） |
+| 🔵 **第二買點（價值支撐）** | **{{ quant_eval.get('buy_point_2', 'N/A') }} {{ quant_eval.get('currency', '') }}** | MA60 ({{ quant_eval.get('ma60', 'N/A') }}) 定錨 ｜ {{ quant_eval.get('buy_point_2_status', '') }} |
+| 🛑 **動態移動停損價** | **{{ quant_eval.get('dynamic_stop_loss', 'N/A') }} {{ quant_eval.get('currency', '') }}** | 取「20日高點-2.5×ATR ({{ quant_eval.get('atr_stop_loss', 'N/A') }})」與「買入參考價往下 8% ({{ quant_eval.get('hard_cap_stop_loss', 'N/A') }})」較高者 |
+| 🎊 **波段停利參考價** | **{{ quant_eval.get('swing_take_profit', 'N/A') }} {{ quant_eval.get('currency', '') }}** | 波段風險報酬比目標價 |
+| 💰 **分批進場資金比例建議** | **30% / 40% / 30%** | {{ quant_eval.get('position_sizing_advice', '首波試單 30% 資金') }} |
+{% if quant_eval.get('is_etf') %}
+| 📊 **240日年線乖離 / 殖利率分位** | **{{ quant_eval.get('bias_ma240_pct', 'N/A') }}%** / **{{ quant_eval.get('dividend_yield_percentile', 'N/A') }}%分位** | 即時折溢價率：{{ quant_eval.get('etf_premium_discount_pct', 'N/A') }}% |
+{% else %}
+| 📊 **3年營收CAGR / 4季毛利斜率** | **{{ quant_eval.get('revenue_cagr_3y_pct', 'N/A') }}%** / **{{ quant_eval.get('gross_margin_slope_4q', 'N/A') }}%/季** | 營業現金流比：{{ quant_eval.get('operating_cash_flow_ratio_pct', 'N/A') }}% ｜ 5年PE區間：{{ quant_eval.get('pe_5y_low', 'N/A') }}~{{ quant_eval.get('pe_5y_high', 'N/A') }} |
+{% endif %}
+{% if quant_eval.get('plain_indicator_explanations') %}
+
+#### 💡 新手白話指標解讀與保守分批進場資金建議
+{% for exp in quant_eval.get('plain_indicator_explanations') %}
+- {{ exp }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
 {% if data_persp %}
 ### 📊 {{ labels.data_perspective_heading }}
 

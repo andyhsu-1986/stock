@@ -23,24 +23,23 @@ class DecisionScaleBand:
 
 
 CANONICAL_DECISION_SCALE: tuple[DecisionScaleBand, ...] = (
-    DecisionScaleBand(80, 100, "strong_buy", "buy", "buy", "强烈买入", "高胜率机会，可执行买入/加仓计划"),
-    DecisionScaleBand(60, 79, "buy", "buy", "buy", "买入", "偏积极机会，允许少量待确认项"),
-    DecisionScaleBand(40, 59, "watch", "watch", "hold", "观望", "信号分歧或确认不足，等待触发条件"),
-    DecisionScaleBand(20, 39, "reduce", "reduce", "sell", "减仓", "风险明显抬升，优先降低暴露"),
-    DecisionScaleBand(0, 19, "sell", "sell", "sell", "卖出", "趋势或风险显著恶化，优先退出"),
+    DecisionScaleBand(80, 100, "strong_buy", "buy", "buy", "買入", "高勝率機會，可執行分批買入計畫"),
+    DecisionScaleBand(60, 79, "buy", "buy", "buy", "買入", "偏正向機會，可於第一/第二買點分批布局"),
+    DecisionScaleBand(40, 59, "watch", "hold", "hold", "持有", "訊號分歧或等待拉回支撐，建議續抱或觀望"),
+    DecisionScaleBand(20, 39, "reduce", "sell", "sell", "賣出", "風險明顯抬升或跌破支撐，優先調節減碼"),
+    DecisionScaleBand(0, 19, "sell", "sell", "sell", "賣出", "觸發動態停損或基本面惡化，優先停損退出"),
 )
 
 
-CANONICAL_DECISION_SCALE_PROMPT_ZH = """## Canonical 评分与动作口径
+CANONICAL_DECISION_SCALE_PROMPT_ZH = """## 四維度量化信心分數與決策口徑（必須嚴格遵守）
 
-- `sentiment_score`、`operation_advice`、三态 `decision_type` 与八态 `action` 必须按同一口径表达。
-- 80-100：强烈买入，`action=buy`，`decision_type=buy`。
-- 60-79：买入，`action=buy`，`decision_type=buy`。
-- 40-59：观望，`action=watch`，`decision_type=hold`。
-- 20-39：减仓，`action=reduce`，`decision_type=sell`。
-- 0-19：卖出，`action=sell`，`decision_type=sell`。
-- `decision_type` 只保留 `buy|hold|sell` 兼容统计；更细建议必须写入 `action`。
-- 若 score >= 60 但最终 `action` 是 `hold/watch`，或 score < 40 但最终 `action` 是 `hold/watch`，必须在 `guardrail_reason` 或 `dashboard.decision_stability.reason` 中说明降级原因。"""
+- 最終信心分數 `sentiment_score`（0～100）必須依據以下四維度加權公式計算：
+  **最終信心分數 = 35% × 財報基本面/ETF估值位階 + 25% × 技術位階 + 20% × 籌碼與總經 + 20% × AI 新聞一致性**
+- `operation_advice` 僅使用繁體中文「**買入**」、「**持有**」、「**賣出**」三種核心建議，並與 `decision_type`（`buy|hold|sell`）一致：
+  - **60～100 分**：`operation_advice="買入"`，`action="buy"`，`decision_type="buy"`
+  - **40～59 分**：`operation_advice="持有"`，`action="hold"`，`decision_type="hold"`
+  - **0～39 分**：`operation_advice="賣出"`，`action="sell"`，`decision_type="sell"`
+- **台股 ETF 溢價風險護欄**：當台股 ETF 即時溢價率超過 **1.5%** 時，不論分數高低，嚴禁給出「買入」，必須降級為「持有」並於 `guardrail_reason` 與 `risk_alerts` 標註溢價風險。"""
 
 
 CANONICAL_DECISION_SCALE_PROMPT_EN = """## Canonical Score and Action Scale

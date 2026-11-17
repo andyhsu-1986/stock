@@ -248,6 +248,7 @@ class StockAnalysisPipeline:
         portfolio_context: Optional[Dict[str, Any]] = None,
         daily_market_context_enabled: Optional[bool] = None,
         daily_market_context_allow_generate: bool = True,
+        market_scope: str = "all",
     ):
         """
         初始化调度器
@@ -255,8 +256,10 @@ class StockAnalysisPipeline:
         Args:
             config: 配置对象（可选，默认使用全局配置）
             max_workers: 最大并发线程数（可选，默认从配置读取）
+            market_scope: 市場範圍（all / tw / us）
         """
         self.config = config or get_config()
+        self.market_scope = (market_scope or "all").strip().lower() or "all"
         self.max_workers = max_workers or self.config.max_workers
         self.source_message = source_message
         self.query_id = query_id
@@ -279,8 +282,11 @@ class StockAnalysisPipeline:
         # 初始化各模块
         self.db = get_db()
         self.fetcher_manager = DataFetcherManager()
-        # 不再单独创建 akshare_fetcher，统一使用 fetcher_manager 获取增强数据
-        self.trend_analyzer = StockTrendAnalyzer()  # 技术分析器
+        self.trend_analyzer = StockTrendAnalyzer()  # 技術分析器
+        from engine.quant_evaluator import QuantEvaluator
+        self.quant_evaluator = QuantEvaluator(
+            finmind_token=getattr(self.config, "finmind_api_token", None)
+        )
         self.analyzer = GeminiAnalyzer(config=self.config, skills=self.analysis_skills)
         self.notifier = NotificationService(source_message=source_message)
         self.market_structure_service = MarketStructureService(fetcher_manager=self.fetcher_manager)
@@ -796,6 +802,42 @@ class StockAnalysisPipeline:
                 enhanced_context["portfolio_context"] = dict(portfolio_context)
             if isinstance(market_structure_context, dict):
                 enhanced_context["market_structure_context"] = market_structure_context
+
+            # Step 6.5: 執行台美股雙軌量化算價與財報趨勢引擎 (engine/quant_evaluator.py)
+            try:
+                from engine.quant_evaluator import QuantEvaluator
+
+                qe = getattr(self, "quant_evaluator", None) or QuantEvaluator()
+                inst_block = (
+                    fundamental_context.get("institution", {})
+                    if isinstance(fundamental_context, dict)
+                    else {}
+                )
+                inst_net = (
+                    inst_block.get("data")
+                    if isinstance(inst_block, dict) and inst_block.get("status") == "ok"
+                    else None
+                )
+                bars_df = df if "df" in locals() and isinstance(df, pd.DataFrame) else None
+                quant_eval = qe.evaluate(
+                    code,
+                    name=stock_name,
+                    daily_df=bars_df,
+                    institutional_net=inst_net,
+                )
+                enhanced_context["quant_evaluation"] = quant_eval.to_dict()
+                logger.info(
+                    "%s(%s) 雙軌量化算價完成: 第一買點=%s, 第二買點=%s, 動態停損=%s, 基礎信心分數=%d (%s)",
+                    stock_name,
+                    code,
+                    quant_eval.buy_point_1,
+                    quant_eval.buy_point_2,
+                    quant_eval.dynamic_stop_loss,
+                    quant_eval.base_confidence_score,
+                    quant_eval.quant_action_advice,
+                )
+            except Exception as exc:
+                logger.warning("%s(%s) 雙軌量化算價引擎異常 (Fail-Open): %s", stock_name, code, exc)
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             (
@@ -3561,8 +3603,9 @@ class StockAnalysisPipeline:
         if not dry_run:
             self.fetcher_manager.prefetch_stock_names(stock_codes, use_bulk=False)
 
-        # 单股推送模式（#55）：从配置读取
+        # 单股推送模式（#55）：从配置读取（若啟用高門檻防洗版過濾則統一於分析結束後依最高分前3檔精選過濾）
         single_stock_notify = getattr(self.config, 'single_stock_notify', False)
+        alert_filter_enabled = bool(getattr(self.config, 'alert_filter_enabled', True))
         # Issue #119: 从配置读取报告类型
         report_type_str = getattr(self.config, 'report_type', 'simple').lower()
         if report_type_str == 'brief':
@@ -3616,7 +3659,7 @@ class StockAnalysisPipeline:
                     result = future.result()
                     if result and result.success:
                         results.append(result)
-                        if single_stock_notify and send_notification and not dry_run:
+                        if single_stock_notify and not alert_filter_enabled and send_notification and not dry_run:
                             self._send_single_stock_notification(
                                 result,
                                 report_type=report_type,
@@ -3670,13 +3713,42 @@ class StockAnalysisPipeline:
         logger.info("===== 分析完成 =====")
         logger.info(f"成功: {success_count}, 失败: {fail_count}, 耗时: {elapsed_time:.2f} 秒")
         
+        # 執行防洗版高門檻精選評估並紀錄每日觀察快照（寫入 data/alert_state.json 供週報追蹤）
+        alert_decisions: List[Any] = []
+        alert_manager = None
+        if results and not dry_run:
+            try:
+                from zoneinfo import ZoneInfo
+                from utils.alert_state import AlertFilterConfig, AlertStateManager
+
+                alert_cfg = AlertFilterConfig(
+                    min_buy_score=int(getattr(self.config, "alert_min_buy_score", 82) or 82),
+                    max_daily_buy_alerts=int(getattr(self.config, "alert_max_daily_buy", 3) or 3),
+                    cooldown_trading_days=int(getattr(self.config, "alert_cooldown_trading_days", 5) or 5),
+                    price_move_threshold_pct=float(
+                        getattr(self.config, "alert_price_move_threshold_pct", 3.0) or 3.0
+                    ),
+                )
+                alert_manager = AlertStateManager(config=alert_cfg)
+                tw_ref_date = datetime.now(ZoneInfo("Asia/Taipei")).date()
+                alert_decisions = alert_manager.evaluate_batch(results, reference_date=tw_ref_date)
+                alert_manager.record_daily_snapshots(results, alert_decisions, reference_date=tw_ref_date)
+            except Exception as exc:
+                logger.warning("[AlertState] 防洗版狀態評估失敗 (Fail-Open): %s", exc)
+
         # 保存报告到本地文件（无论是否推送通知都保存）
         if results and not dry_run:
-            self._save_local_report(results, report_type)
+            self._save_local_report(results, report_type, alert_decisions=alert_decisions)
 
-        # 发送通知（单股推送模式下跳过汇总推送，避免重复）
+        # 发送通知
         if results and send_notification and not dry_run:
-            if single_stock_notify:
+            if alert_filter_enabled and alert_decisions:
+                self._send_curated_alerts(
+                    results=results,
+                    decisions=alert_decisions,
+                    alert_manager=alert_manager,
+                )
+            elif single_stock_notify:
                 # 单股推送模式：只保存汇总报告，不再重复推送
                 logger.info("单股推送模式：跳过汇总推送，仅保存报告到本地")
                 self._send_notifications(results, report_type, skip_push=True)
@@ -3800,6 +3872,8 @@ class StockAnalysisPipeline:
         self,
         results: List[AnalysisResult],
         report_type: ReportType = ReportType.SIMPLE,
+        *,
+        alert_decisions: Optional[List[Any]] = None,
     ) -> Optional[str]:
         """保存分析报告到本地文件（与通知推送解耦）"""
         self._last_local_report_path = None
@@ -3807,13 +3881,20 @@ class StockAnalysisPipeline:
         report: Optional[str] = None
         try:
             report = self._generate_aggregate_report(results, report_type)
+            if alert_decisions:
+                from utils.alert_state import format_daily_alert_summary_section
+
+                summary_sec = format_daily_alert_summary_section(alert_decisions)
+                if summary_sec:
+                    report = f"{report}\n\n---\n\n{summary_sec}"
         except Exception as e:
             self._last_local_report_error = str(e)
             logger.error("生成本地报告内容失败: %s", e)
             return None
 
+        target_filename = self._default_report_filename(getattr(self, "market_scope", "all"))
         try:
-            filepath = self.notifier.save_report_to_file(report)
+            filepath = self.notifier.save_report_to_file(report, filename=target_filename)
             if filepath:
                 filepath = str(filepath)
                 self._last_local_report_path = filepath
@@ -3826,7 +3907,7 @@ class StockAnalysisPipeline:
             logger.error(f"保存本地报告失败: {e}")
 
         logger.warning("尝试回退到本地文件系统路径保存聚合报告")
-        fallback_path = self._fallback_save_report_to_file(report)
+        fallback_path = self._fallback_save_report_to_file(report, filename=target_filename)
         if fallback_path:
             self._last_local_report_path = fallback_path
             self._last_local_report_error = None
@@ -3837,10 +3918,88 @@ class StockAnalysisPipeline:
             return None
         return None
 
+    def _send_curated_alerts(
+        self,
+        *,
+        results: List[AnalysisResult],
+        decisions: List[Any],
+        alert_manager: Any,
+    ) -> None:
+        """Send curated high-threshold Traditional Chinese alerts to IM channels and record state."""
+        from zoneinfo import ZoneInfo
+        from utils.alert_state import format_curated_alert_digest
+
+        pushed = [d for d in (decisions or []) if getattr(d, "should_push", False)]
+        if not pushed:
+            logger.info(
+                "[AlertState] 今日無符合高門檻精選推播條件（買入且分數 ≥ %d 或觸及停利/停損線），"
+                "或均在 5 個交易日防洗版期內，略過即時通訊推播（完整結果已寫入每日 Markdown 總表）。",
+                int(getattr(self.config, "alert_min_buy_score", 82) or 82),
+            )
+            notification_run = self._build_notification_run_snapshot(
+                channel="alert",
+                status="skipped",
+                success=False,
+                attempts=0,
+            )
+            record_notification_run(channel="alert", status="skipped", success=False, attempts=0)
+            self._refresh_saved_diagnostic_snapshot(results=results, notification_run=notification_run)
+            return
+
+        tw_date = datetime.now(ZoneInfo("Asia/Taipei")).date()
+        digest = format_curated_alert_digest(
+            pushed,
+            report_date=tw_date.strftime("%Y-%m-%d"),
+            all_decisions=decisions,
+        )
+
+        if not self.notifier.is_available():
+            logger.info("[AlertState] 通知管道未設定，略過推播並保留狀態（僅寫入每日報告）。")
+            notification_run = self._build_notification_run_snapshot(
+                channel="alert",
+                status="not_configured",
+                success=False,
+                attempts=0,
+            )
+            record_notification_run(channel="alert", status="not_configured", success=False, attempts=0)
+            self._refresh_saved_diagnostic_snapshot(results=results, notification_run=notification_run)
+            return
+
+        has_risk_alert = any(getattr(d, "trigger_type", "") in ("stop_loss", "take_profit") for d in pushed)
+        sent = self.notifier.send(
+            digest,
+            email_send_to_all=True,
+            route_type="alert",
+            severity="warning" if has_risk_alert else "info",
+            dedup_key=f"curated_alert:{getattr(self, 'market_scope', 'all')}:{tw_date.isoformat()}",
+        )
+        if sent and alert_manager is not None:
+            alert_manager.record_pushed_alerts(pushed, reference_date=tw_date)
+            logger.info("[AlertState] 已發送精選高勝率推播共 %d 檔並更新防洗版狀態機", len(pushed))
+        elif not sent:
+            logger.warning("[AlertState] 精選推播發送失敗，未更新防洗版冷卻狀態（下次排程將重試）")
+
+        notification_run = self._build_notification_run_snapshot(
+            channel="alert",
+            status="success" if sent else "failed",
+            success=bool(sent),
+        )
+        record_notification_run(
+            channel="alert",
+            status="success" if sent else "failed",
+            success=bool(sent),
+        )
+        self._refresh_saved_diagnostic_snapshot(results=results, notification_run=notification_run)
+
     @staticmethod
-    def _default_report_filename() -> str:
-        """Build default local report filename (aligned with notifier defaults)."""
-        date_str = datetime.now().strftime('%Y%m%d')
+    def _default_report_filename(market_scope: str = "all") -> str:
+        """Build default local report filename (scoped by tw/us session when specified)."""
+        from zoneinfo import ZoneInfo
+
+        date_str = datetime.now(ZoneInfo("Asia/Taipei")).strftime('%Y%m%d')
+        scope = (market_scope or "all").strip().lower()
+        if scope in ("tw", "us"):
+            return f"report_{date_str}_{scope}.md"
         return f"report_{date_str}.md"
 
     @staticmethod

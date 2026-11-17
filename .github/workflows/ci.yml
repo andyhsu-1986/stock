@@ -39,7 +39,7 @@ jobs:
               - '{*.py,api/**,bot/**,data_provider/**,src/**,strategies/**,apps/dsa-web/**,docker/**,requirements.txt,.dockerignore,.github/workflows/ci.yml}'
               - '!**/*.md'
             futu_packaging:
-              - '{requirements.txt,main.py,src/brokers/futu/**,scripts/build-backend.ps1,scripts/build-backend-macos.sh,scripts/macos-signature-audit.sh,scripts/build-all.ps1,scripts/build-all-macos.sh,apps/dsa-desktop/**,.github/workflows/ci.yml,.github/workflows/desktop-release.yml}'
+              - '{requirements.txt,main.py,scripts/build-backend.ps1,scripts/build-backend-macos.sh,scripts/macos-signature-audit.sh,scripts/build-all.ps1,scripts/build-all-macos.sh,apps/dsa-desktop/**,.github/workflows/ci.yml,.github/workflows/desktop-release.yml}'
               - '!**/*.md'
       - name: 🧭 Filter backend-safe frontend paths
         id: backend-filter
@@ -110,9 +110,6 @@ jobs:
             echo "Dependency install attempt ${attempt} failed, retrying in 15s..." >&2
             sleep 15
           done
-      - name: 🔌 Verify global Futu SDK
-        if: matrix.shard == 1
-        run: python -c "import futu; print('✅ futu SDK import OK')"
       - name: ✅ Python syntax check
         if: matrix.shard == 1
         run: ./scripts/ci_gate.sh syntax
@@ -183,10 +180,10 @@ jobs:
           from src.notification import NotificationService; print('✅ notification')
           from data_provider import DataFetcherManager; print('✅ data_provider')
           from src.analyzer import GeminiAnalyzer; print('✅ analyzer')
-          from src.patches.eastmoney_patch import eastmoney_patch; print('✅ patch')
+          from engine.quant_evaluator import QuantEvaluator; print('✅ quant_evaluator')
+          from utils.alert_state import AlertStateManager; print('✅ alert_state')
           from bot.dispatcher import CommandDispatcher; print('✅ bot')
           from api.app import app; print('✅ api')
-          import futu; print('✅ futu')
           print('✅ All Docker imports OK')
           "
 

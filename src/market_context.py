@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Market context detection for LLM prompts.
+Market context detection for LLM prompts (Taiwan & US Markets Only).
 
-Detects the market (A-shares, HK, US) from a stock code and returns
-market-specific role descriptions so prompts are not hardcoded to a
-single market.
-
-Fixes: https://github.com/ZhuLinsen/daily_stock_analysis/issues/644
+Detects whether a symbol belongs to the Taiwan market (`.TW` / `.TWO`, including
+TW stocks and ETFs) or the US market (US stocks and ETFs), and provides concise
+Traditional Chinese / English market rules to save LLM tokens.
 """
+
+from __future__ import annotations
 
 import re
 from typing import Optional
@@ -16,164 +16,67 @@ from src.services.market_symbol_utils import get_suffix_market
 
 
 def detect_market(stock_code: Optional[str]) -> str:
-    """Detect market from stock code.
-
-    Returns:
-        One of 'cn', 'hk', 'us', or 'cn' as fallback.
-    """
+    """Detect market from stock code ('tw' or 'us')."""
     if not stock_code:
-        return "cn"
+        return "tw"
 
     code = stock_code.strip().upper()
-
-    # HK stocks: HK00700, 00700.HK, or 5-digit pure numbers
-    if code.startswith("HK") or code.endswith(".HK"):
-        return "hk"
-    lower = code.lower()
-    if lower.endswith(".hk"):
-        return "hk"
-    # 5-digit pure numbers are HK (A-shares are 6-digit)
-    if code.isdigit() and len(code) == 5:
-        return "hk"
-
-    # Suffix-only Yahoo symbols for JP/KR/TW. Bare Korean/Taiwan numeric
-    # codes keep existing fallback semantics to avoid cross-market collisions.
     suffix_market = get_suffix_market(code)
-    if suffix_market:
-        return suffix_market
+    if suffix_market == "tw" or code.endswith((".TW", ".TWO")):
+        return "tw"
 
-    # US stocks: 1-5 uppercase letters (AAPL, TSLA, GOOGL)
-    # Also handles suffixed forms like BRK.B
-    if re.match(r'^[A-Z]{1,5}(\.[A-Z]{1,2})?$', code):
+    if re.match(r"^[A-Z]{1,5}(\.[A-Z]{1,2})?$", code) or code.startswith("^"):
         return "us"
 
-    # Default: A-shares (6-digit numbers like 600519, 000001)
-    return "cn"
+    return "tw"
 
-
-# -- Market-specific role descriptions --
 
 _MARKET_ROLES = {
-    "cn": {
-        "zh": " A 股",
-        "en": "China A-shares",
-    },
-    "hk": {
-        "zh": "港股",
-        "en": "Hong Kong stock",
+    "tw": {
+        "zh": "台股（上市/上櫃個股與 ETF）",
+        "en": "Taiwan stock & ETF",
     },
     "us": {
-        "zh": "美股",
-        "en": "US stock",
-    },
-    "jp": {
-        "zh": "日股",
-        "en": "Japan stock",
-    },
-    "kr": {
-        "zh": "韩股",
-        "en": "Korea stock",
-    },
-    "tw": {
-        "zh": "台股",
-        "en": "Taiwan stock",
+        "zh": "美股（NYSE/NASDAQ 個股與 ETF）",
+        "en": "US stock & ETF",
     },
 }
 
 _MARKET_GUIDELINES = {
-    "cn": {
+    "tw": {
         "zh": (
-            "- 本次分析对象为 **A 股**（中国沪深交易所上市股票）。\n"
-            "- 请关注 A 股特有的涨跌停机制（±10%/±20%/±30%）、T+1 交易制度及相关政策因素。"
+            "- 本次分析標的為 **台股**（台灣證券交易所上市 `.TW` 或櫃買中心上櫃 `.TWO`）。\n"
+            "- 交易規則與分析重點：計價幣別為**新台幣（TWD）**；交易時段 09:00–13:30，漲跌幅限制為 **±10%**（ETF 無漲跌幅限制或依追蹤標的而定）。\n"
+            "- 籌碼與基本面重點：關注**三大法人（外資、投信、自營商）買賣超**、月營收年增率、近 3 年營收 CAGR、毛利率斜率、本益比（PE）5 年位階與現金殖利率；台股 ETF 需特別檢核**即時折溢價率**（溢價 > 1.5% 時嚴禁追高）。"
         ),
         "en": (
-            "- This analysis covers a **China A-share** (listed on Shanghai/Shenzhen exchanges).\n"
-            "- Consider A-share-specific rules: daily price limits (±10%/±20%/±30%), T+1 settlement, and PRC policy factors."
-        ),
-    },
-    "hk": {
-        "zh": (
-            "- 本次分析对象为 **港股**（香港交易所上市股票）。\n"
-            "- 港股无涨跌停限制，支持 T+0 交易，需关注港币汇率、南北向资金流及联交所特有规则。"
-        ),
-        "en": (
-            "- This analysis covers a **Hong Kong stock** (listed on HKEX).\n"
-            "- HK stocks have no daily price limits, allow T+0 trading. Consider HKD FX, Southbound/Northbound flows, and HKEX-specific rules."
+            "- This analysis covers a **Taiwan security** (TWSE `.TW` or TPEx `.TWO`, priced in TWD).\n"
+            "- Focus on the three institutional investor groups (Foreign, Investment Trust, Dealer), monthly revenue YoY, 3Y revenue CAGR, gross margin slope, 5Y PE band, dividend yield, and TWSE/TPEx ±10% daily price limits (for ETFs, check real-time NAV premium/discount > 1.5%)."
         ),
     },
     "us": {
         "zh": (
-            "- 本次分析对象为 **美股**（美国交易所上市股票）。\n"
-            "- 美股无涨跌停限制（但有熔断机制），支持 T+0 交易和盘前盘后交易，需关注美元汇率、美联储政策及 SEC 监管动态。"
+            "- 本次分析標的為 **美股**（NYSE / NASDAQ 上市個股或美股 ETF）。\n"
+            "- 交易規則與分析重點：計價幣別為**美元（USD）**；無單日漲跌幅限制（設有市場熔斷機制），支援盤前與盤後交易。\n"
+            "- 基本面與總經重點：關注聯準會（Fed）利率政策、美債殖利率、美元指數、企業季報財測（Guidance）；美股 ETF 重點評估 **240 日年線乖離率** 與 **歷史殖利率分位數**。"
         ),
         "en": (
-            "- This analysis covers a **US stock** (listed on NYSE/NASDAQ).\n"
-            "- US stocks have no daily price limits (but have circuit breakers), allow T+0 and pre/after-market trading. Consider USD FX, Fed policy, and SEC regulations."
-        ),
-    },
-    "jp": {
-        "zh": (
-            "- 本次分析对象为 **日股**（日本交易所上市股票，Yahoo Finance suffix 如 `.T`）。\n"
-            "- 请按日本市场语境分析，关注日元汇率、日本央行政策、公司治理与行业周期；不要套用 A 股涨跌停、北向资金、龙虎榜、融资融券等 A 股专属概念。"
-        ),
-        "en": (
-            "- This analysis covers a **Japan stock** (Yahoo Finance suffix such as `.T`).\n"
-            "- Use Japan-market context: JPY FX, BOJ policy, corporate governance, and sector cycles; do not apply China A-share concepts such as daily price-limit boards, Northbound flows, Dragon Tiger lists, or margin-financing narratives."
-        ),
-    },
-    "kr": {
-        "zh": (
-            "- 本次分析对象为 **韩股**（韩国交易所/KOSDAQ 上市股票，必须带 `.KS` / `.KQ` 后缀）。\n"
-            "- 请按韩国市场语境分析，关注韩元汇率、韩国央行政策、半导体/互联网产业周期与韩国交易制度；不要套用 A 股涨跌停、北向资金、龙虎榜、融资融券等 A 股专属概念。"
-        ),
-        "en": (
-            "- This analysis covers a **Korea stock** (KOSPI/KOSDAQ suffix `.KS` / `.KQ`).\n"
-            "- Use Korea-market context: KRW FX, Bank of Korea policy, semiconductor/internet cycles, and local trading rules; do not apply China A-share concepts such as daily price-limit boards, Northbound flows, Dragon Tiger lists, or margin-financing narratives."
-        ),
-    },
-    "tw": {
-        "zh": (
-            "- 本次分析对象为 **台股**（台湾证券交易所上市 `.TW`，或台湾柜买中心上柜 `.TWO`）。\n"
-            "- 请按台湾市场语境分析，关注新台币（TWD）汇率、台湾央行政策、半导体/电子代工产业链、"
-            "三大法人（外资／投信／自营商）买卖超、融资融券与当冲，以及 TWSE/TPEx ±10% 涨跌停制度；"
-            "不要套用 A 股专属的北向资金、龙虎榜等概念（台股的法人结构与资金流口径与 A 股不同）。"
-        ),
-        "en": (
-            "- This analysis covers a **Taiwan stock** (TWSE-listed `.TW`, or TPEx/OTC `.TWO`).\n"
-            "- Use Taiwan-market context: TWD FX, Central Bank of the ROC policy, the semiconductor/"
-            "electronics-foundry supply chain, the three institutional investor groups (foreign / "
-            "investment-trust / dealer), margin trading and day trading, and the TWSE/TPEx ±10% daily "
-            "price limit; do not apply China A-share-specific concepts such as Northbound flows or Dragon Tiger lists."
+            "- This analysis covers a **US security** (NYSE/NASDAQ stock or ETF, priced in USD).\n"
+            "- US markets have no daily price limits (circuit breakers apply) and support pre/post-market trading. Consider Fed policy, US Treasury yields, earnings guidance, and for ETFs, 240-day MA bias and historical dividend yield percentile."
         ),
     },
 }
 
 
 def get_market_role(stock_code: Optional[str], lang: str = "zh") -> str:
-    """Return market-specific role description for LLM prompt.
-
-    Args:
-        stock_code: The stock code being analyzed.
-        lang: 'zh' or 'en'.
-
-    Returns:
-        Role string like 'A 股投资分析' or 'US stock investment analysis'.
-    """
+    """Return market-specific role description for LLM prompt."""
     market = detect_market(stock_code)
     lang_key = "en" if lang in ("en", "ko") else "zh"
-    return _MARKET_ROLES.get(market, _MARKET_ROLES["cn"])[lang_key]
+    return _MARKET_ROLES.get(market, _MARKET_ROLES["tw"])[lang_key]
 
 
 def get_market_guidelines(stock_code: Optional[str], lang: str = "zh") -> str:
-    """Return market-specific analysis guidelines for LLM prompt.
-
-    Args:
-        stock_code: The stock code being analyzed.
-        lang: 'zh' or 'en'.
-
-    Returns:
-        Multi-line string with market-specific guidelines.
-    """
+    """Return market-specific analysis guidelines for LLM prompt."""
     market = detect_market(stock_code)
     lang_key = "en" if lang in ("en", "ko") else "zh"
-    return _MARKET_GUIDELINES.get(market, _MARKET_GUIDELINES["cn"])[lang_key]
+    return _MARKET_GUIDELINES.get(market, _MARKET_GUIDELINES["tw"])[lang_key]

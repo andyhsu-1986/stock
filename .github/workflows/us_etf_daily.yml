@@ -1,0 +1,155 @@
+name: 美股觀察名單與總經新聞分析 (US ETF Daily)
+
+on:
+  # 台灣時間週二至週六 06:30 (Asia/Taipei, UTC+8) = UTC 22:30 週一至週五（美股收盤後）
+  schedule:
+    - cron: '30 22 * * 1-5'
+
+  # 支援手動觸發測試
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: '略過交易日檢查，強制執行美股觀察名單分析'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: us-etf-daily
+  cancel-in-progress: false
+
+jobs:
+  us-etf-analysis:
+    name: 美股與美股 ETF 觀察名單 + 總經新聞分析
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '20') }}
+
+    steps:
+      - name: 檢出程式碼
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 設定 Python 3.11 環境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安裝相依套件
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 建立資料與報告目錄
+        run: mkdir -p data logs reports
+
+      - name: 執行美股觀察名單與總經新聞分析
+        env:
+          # 美股行情與總經資料源金鑰（嚴禁寫死，全部經由 Secrets 注入）
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          LONGBRIDGE_APP_KEY: ${{ secrets.LONGBRIDGE_APP_KEY }}
+          LONGBRIDGE_APP_SECRET: ${{ secrets.LONGBRIDGE_APP_SECRET }}
+          LONGBRIDGE_ACCESS_TOKEN: ${{ secrets.LONGBRIDGE_ACCESS_TOKEN }}
+
+          # LLM AI 分析引擎金鑰與模型設定
+          GENERATION_BACKEND: ${{ vars.GENERATION_BACKEND || 'litellm' }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
+          LITELLM_FALLBACK_MODELS: ${{ vars.LITELLM_FALLBACK_MODELS || secrets.LITELLM_FALLBACK_MODELS }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-2.5-flash' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+          # 美股與總經新聞搜尋金鑰
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+
+          # 即時通訊推播（Telegram / Discord）
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_MESSAGE_THREAD_ID: ${{ secrets.TELEGRAM_MESSAGE_THREAD_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_MAIN_CHANNEL_ID: ${{ secrets.DISCORD_MAIN_CHANNEL_ID }}
+
+          # 美股觀察名單與雙軌 ETF 算價設定
+          STOCK_LIST_CONFIG: ${{ vars.STOCK_LIST || secrets.STOCK_LIST }}
+          TW_SCREENER_ENABLED: 'false'
+          MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || 'true' }}
+          MARKET_REVIEW_REGION: 'us'
+          REPORT_LANGUAGE: 'zh'
+          REPORT_TYPE: ${{ vars.REPORT_TYPE || 'full' }}
+          TRADING_DAY_CHECK_ENABLED: 'true'
+
+          # 新手高門檻防洗版狀態機設定
+          ALERT_FILTER_ENABLED: 'true'
+          ALERT_MIN_BUY_SCORE: '82'
+          ALERT_MAX_DAILY_BUY: '3'
+          ALERT_COOLDOWN_TRADING_DAYS: '5'
+          ALERT_PRICE_MOVE_THRESHOLD_PCT: '3.0'
+          ALERT_SUPPRESS_MARKET_REVIEW_PUSH: 'true'
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || '2' }}
+          LOG_LEVEL: 'INFO'
+        run: |
+          if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
+            export STOCK_LIST="$STOCK_LIST_CONFIG"
+          elif [ -z "${STOCK_LIST:-}" ]; then
+            export STOCK_LIST="VOO,QQQ,0050.TW,00878.TW"
+          fi
+
+          FORCE_RUN_ARG=""
+          if [ "${{ inputs.force_run }}" = "true" ]; then
+            FORCE_RUN_ARG="--force-run"
+            echo "⚡ 已啟用強制執行模式（略過交易日檢查）"
+          fi
+
+          echo "⏰ 執行時間 (Asia/Taipei): $(TZ='Asia/Taipei' date '+%Y-%m-%d %H:%M:%S')"
+          python main.py --market us --no-tw-screener $FORCE_RUN_ARG
+
+      - name: 提交更新後的警報狀態與美股每日報告回 Repository
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+
+          shopt -s nullglob
+          FILES_TO_ADD=()
+          for f in data/alert_state.json reports/*.md; do
+            [ -e "$f" ] && FILES_TO_ADD+=("$f")
+          done
+          if [ "${#FILES_TO_ADD[@]}" -gt 0 ]; then
+            git add "${FILES_TO_ADD[@]}"
+          fi
+
+          if git diff --cached --quiet; then
+            echo "✅ data/alert_state.json 與 reports/ 無新增變更，無需 commit。"
+          else
+            DATE_TW="$(TZ='Asia/Taipei' date '+%Y-%m-%d')"
+            git commit -m "chore(us-daily): 更新美股每日分析報告與防洗版警報狀態 (${DATE_TW}) [skip ci]"
+            git push
+            echo "✅ 已成功提交並推送至 ${GITHUB_REF_NAME}。"
+          fi
+
+      - name: 上傳分析報告與執行日誌 Artifacts
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: us-analysis-reports-${{ github.run_number }}
+          path: |
+            reports/
+            logs/
+          retention-days: 30

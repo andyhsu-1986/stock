@@ -29,7 +29,6 @@ from src.data.stock_mapping import STOCK_NAME_MAP, is_meaningful_stock_name
 from src.services.market_symbol_utils import is_suffix_market_symbol
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
 from src.services.stock_list_parser import AnalysisTarget, ParseStatus, parse_analysis_target
-from .fundamental_adapter import AkshareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
 from .realtime_types import CircuitBreaker
 
@@ -703,8 +702,7 @@ class DataFetcherManager:
         else:
             # 默认数据源将在首次使用时延迟加载
             self._init_default_fetchers()
-        self._fundamental_adapter = AkshareFundamentalAdapter()
-        self._yfinance_fundamental_adapter = YfinanceFundamentalAdapter()
+        self._fundamental_adapter = self._yfinance_fundamental_adapter = YfinanceFundamentalAdapter()
         self._futu_fundamental_fetcher = None
         self._tickflow_fetcher = None
         self._tickflow_api_key: Optional[str] = None
@@ -875,20 +873,7 @@ class DataFetcherManager:
 
     @classmethod
     def _record_daily_source_failure(cls, fetcher: BaseFetcher, market: str, error: str | Exception) -> None:
-        # Import lazily because TushareFetcher inherits BaseFetcher from this module.
-        from .tushare_fetcher import TusharePermissionError
-
         key = cls._daily_health_key(fetcher, market)
-        current = error
-        visited = set()
-        while isinstance(current, BaseException) and id(current) not in visited:
-            visited.add(id(current))
-            if isinstance(current, TusharePermissionError):
-                # Endpoint permission is not evidence of a provider outage. Preserve
-                # previous network failures and release any half-open probe reservation.
-                cls._daily_source_health.record_inconclusive(key)
-                return
-            current = current.__cause__ or current.__context__
         reason = summarize_exception(error)[1] if isinstance(error, Exception) else error
         cls._daily_source_health.record_failure(key, error=reason)
 
@@ -1812,124 +1797,40 @@ class DataFetcherManager:
     
     def _init_default_fetchers(self) -> None:
         """
-        初始化默认数据源列表
-
-        优先级动态调整逻辑：
-        - 如果配置了 TUSHARE_TOKEN：实例化 TushareFetcher，并按其内部逻辑提升优先级
-        - 如果配置了 Longbridge OAuth 或 Legacy 凭据：实例化 LongbridgeFetcher 作为美股/港股兜底
-        - 未配置的可选数据源不实例化，避免在批量拉取时反复探测无效源
-        - 默认优先级：
-          0. EfinanceFetcher (Priority 0) - 最高优先级
-          1. AkshareFetcher (Priority 1)
-          2. PytdxFetcher (Priority 2) - 通达信
-          3. BaostockFetcher (Priority 3)
-          4. YfinanceFetcher (Priority 4)
-          5. TencentFetcher (Priority 5) - A 股最终兜底
+        初始化預設資料源列表（僅保留台股與美股所需之資料源）
         """
         from src.config import get_config
-        from .efinance_fetcher import EfinanceFetcher
-        from .tencent_fetcher import TencentFetcher
-        from .akshare_fetcher import AkshareFetcher
-        from .tushare_fetcher import TushareFetcher
-        from .tickflow_fetcher import TickFlowFetcher
-        from .tickplus_fetcher import TickPlusFetcher
-        from .pytdx_fetcher import PytdxFetcher
-        from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
         from .longbridge_fetcher import LongbridgeFetcher
-        from .futu_fetcher import FutuFetcher
+
         config = get_config()
-        # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
-        efinance = EfinanceFetcher()
-        tencent = TencentFetcher()
-        akshare = AkshareFetcher()
-        pytdx = PytdxFetcher()      # 通达信数据源（可配 PYTDX_HOST/PYTDX_PORT）
-        baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
         optional_fetchers: List[BaseFetcher] = []
 
-        tushare_token = (getattr(config, "tushare_token", None) or "").strip()
-        if tushare_token:
-            optional_fetchers.append(TushareFetcher())  # 会根据 Token 配置自动调整优先级
-        else:
-            logger.debug("[数据源初始化] 跳过未配置的 TushareFetcher")
-
-        tickflow_api_key = (getattr(config, "tickflow_api_key", None) or "").strip()
-        if tickflow_api_key:
-            optional_fetchers.append(
-                TickFlowFetcher(
-                    api_key=tickflow_api_key,
-                    kline_adjust=getattr(config, "tickflow_kline_adjust", "none"),
-                    batch_daily_enabled=getattr(config, "tickflow_batch_daily_enabled", True),
-                    batch_size=getattr(config, "tickflow_batch_size", 100),
-                    priority=getattr(config, "tickflow_priority", 2),
-                )
-            )
-        else:
-            logger.debug("[data source init] skip TickFlowFetcher because TICKFLOW_API_KEY is not configured")
-
-        mx_apikey = getattr(config, "mx_apikey", None)
-        if not isinstance(mx_apikey, str):
-            mx_apikey = ""
-        mx_apikey = mx_apikey.strip()
-        if mx_apikey:
-            from .miaoxiang_fetcher import MiaoxiangFetcher
-
-            optional_fetchers.append(
-                MiaoxiangFetcher(
-                    api_key=mx_apikey,
-                    priority=getattr(config, "mx_priority", 6),
-                )
-            )
-        else:
-            logger.debug("[data source init] skip MiaoxiangFetcher because MX_APIKEY is not configured")
-
         if LongbridgeFetcher.has_configured_credentials(config):
-            optional_fetchers.append(LongbridgeFetcher())  # 长桥（美股/港股兜底，懒加载）
-        else:
-            logger.debug("[数据源初始化] 跳过未配置的 LongbridgeFetcher")
-
-        if FutuFetcher.has_configured_endpoint():
-            optional_fetchers.append(FutuFetcher())  # 富途（港股，依赖 OpenD）
-        else:
-            logger.debug("[数据源初始化] 跳过未配置的 FutuFetcher")
+            optional_fetchers.append(LongbridgeFetcher())
 
         finnhub_api_key = (getattr(config, "finnhub_api_key", None) or "").strip()
         if finnhub_api_key:
             from .finnhub_fetcher import FinnhubFetcher
             optional_fetchers.append(FinnhubFetcher())
-        else:
-            logger.debug("[数据源初始化] 跳过未配置的 FinnhubFetcher")
 
         alphavantage_api_key = (getattr(config, "alphavantage_api_key", None) or "").strip()
         if alphavantage_api_key:
             from .alphavantage_fetcher import AlphaVantageFetcher
             optional_fetchers.append(AlphaVantageFetcher())
-        else:
-            logger.debug("[数据源初始化] 跳过未配置的 AlphaVantageFetcher")
 
-        # 初始化数据源列表
         self._ensure_concurrency_guards()
         with self._fetchers_lock:
-            tickplus_key = (getattr(config, "tickplus_api_key", None) or "").strip()
             self._fetchers = [
-                *([TickPlusFetcher(tickplus_key, getattr(config, "tickplus_priority", 0))] if tickplus_key else []),
-                efinance,
-                akshare,
-                pytdx,
-                baostock,
                 yfinance,
-                tencent,
                 *optional_fetchers,
             ]
-
-            # 按优先级排序（Tushare 如果配置了 Token 且初始化成功，优先级为 0）
             self._fetchers.sort(key=lambda f: f.priority)
             self._refresh_fetcher_indexes_locked()
 
-        # 构建优先级说明
         priority_info = ", ".join([f"{f.name}(P{f.priority})" for f in self._get_fetchers_snapshot()])
-        logger.info(f"已初始化 {len(self._fetchers)} 个数据源（按优先级）: {priority_info}")
+        logger.info(f"已初始化 {len(self._fetchers)} 個台美股資料源（按優先級）: {priority_info}")
     
     def add_fetcher(self, fetcher: BaseFetcher) -> None:
         """添加数据源并重新排序"""
@@ -2478,7 +2379,7 @@ class DataFetcherManager:
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
 
-        from .akshare_fetcher import _is_us_code
+        from .us_index_mapping import is_us_stock_code as _is_us_code
         from .us_index_mapping import is_us_index_code
         from src.config import get_config
 
@@ -3143,7 +3044,7 @@ class DataFetcherManager:
                 return name
 
         # 3. 依次尝试各个数据源
-        from .akshare_fetcher import _is_us_code
+        from .us_index_mapping import is_us_stock_code as _is_us_code
         is_us = _is_us_code(stock_code)
         _US_CAPABLE_FETCHERS = {"YfinanceFetcher", "LongbridgeFetcher", "FinnhubFetcher", "AlphaVantageFetcher"}
         for fetcher in self._get_fetchers_snapshot():

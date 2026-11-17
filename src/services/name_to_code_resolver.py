@@ -171,20 +171,8 @@ def _akshare_stock_info_worker():
 
 
 def _fetch_akshare_df():
-    """AkShare 全量拉取的唯一网络出口（测试接缝）。
-
-    经 data_provider 的子进程超时包装（spawn）执行：挂起的网络请求在
-    _AKSHARE_FETCH_TIMEOUT 内被杀死，父进程侧以 TimeoutError 抛出。
-    akshare 内部的 @lru_cache 只存在于子进程，30 分钟 TTL 过期后的
-    刷新在父进程侧始终拿到新数据。
-    """
-    from data_provider.akshare_fetcher import _akshare_call_with_timeout
-
-    return _akshare_call_with_timeout(
-        _akshare_stock_info_worker,
-        timeout=_AKSHARE_FETCH_TIMEOUT,
-        call_name="stock_info_a_code_name",
-    )
+    """Non-TW/US AkShare A-share resolver removed."""
+    return None
 
 
 def _build_name_map_from_df(df) -> Dict[str, str]:

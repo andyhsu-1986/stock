@@ -4,21 +4,16 @@
 from typing import Optional
 
 
-MARKET_REVIEW_REGION_ORDER = ("cn", "hk", "us", "jp", "kr", "tw")
+MARKET_REVIEW_REGION_ORDER = ("tw", "us")
 MARKET_REVIEW_REGION_SET = frozenset(MARKET_REVIEW_REGION_ORDER)
 MARKET_REVIEW_REGION_ALL = ",".join(MARKET_REVIEW_REGION_ORDER)
 MARKET_REVIEW_REGION_VALID_INPUTS = (*MARKET_REVIEW_REGION_ORDER, "both")
 
 
 def normalize_market_review_region_lenient(value: Optional[str]) -> Optional[str]:
-    """Normalize persistent config input while preserving legacy filtering.
+    """Normalize persistent config input to Taiwan/US market regions (default 'tw')."""
 
-    ``None`` and an empty string retain the historical ``cn`` default. Comma
-    lists keep only supported markets, and ``both`` expands to every market.
-    ``None`` is returned only when a non-defaultable value has no valid token.
-    """
-
-    normalized = str(value or "cn").strip().lower()
+    normalized = str(value or "tw").strip().lower()
     if normalized in MARKET_REVIEW_REGION_SET:
         return normalized
     if normalized == "both":

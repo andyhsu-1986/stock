@@ -1252,6 +1252,20 @@ class NotificationService(
             signal_tag,
         )
 
+    def _append_quant_evaluation_block(
+        self,
+        report_lines: List[str],
+        dashboard: Dict[str, Any],
+    ) -> None:
+        quant_eval = dashboard.get("quant_evaluation") if isinstance(dashboard, dict) else None
+        if not isinstance(quant_eval, dict) or not quant_eval.get("symbol"):
+            return
+        from engine.quant_evaluator import format_quant_evaluation_prompt_block
+
+        block = format_quant_evaluation_prompt_block(quant_eval).strip()
+        if block:
+            report_lines.extend([block, ""])
+
     def generate_dashboard_report(
         self,
         results: List[AnalysisResult],
@@ -1416,6 +1430,7 @@ class NotificationService(
                     ])
 
                 self._append_market_snapshot(report_lines, result)
+                self._append_quant_evaluation_block(report_lines, dashboard)
 
                 # ========== 数据透视 ==========
                 data_persp = dashboard.get('data_perspective', {}) if dashboard else {}
@@ -1992,6 +2007,7 @@ class NotificationService(
             lines.extend([excerpt, ""])
 
         self._append_market_snapshot(lines, result)
+        self._append_quant_evaluation_block(lines, dashboard)
 
         # 核心决策（一句话）
         one_sentence = core.get('one_sentence', result.analysis_summary) if core else result.analysis_summary
@@ -2177,7 +2193,7 @@ class NotificationService(
         "CNY": "元",
         "RMB": "元",
         "CNH": "元",
-        "TWD": "新台币",  # 台股 (TWSE/TPEx) 以新台币计价，避免与 A 股「元」(人民币) 混淆
+        "TWD": "新台幣",  # 台股 (TWSE/TPEx) 以新台幣計價
     }
 
     @classmethod

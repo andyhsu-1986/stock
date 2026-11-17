@@ -37,33 +37,18 @@ except ImportError:
         "Run: pip install exchange-calendars"
     )
 
-# Market -> exchange code (exchange-calendars)
-MARKET_EXCHANGE = {"cn": "XSHG", "hk": "XHKG", "us": "XNYS", "jp": "XTKS", "kr": "XKRX", "tw": "XTAI"}
+# Market -> exchange code (exchange-calendars): Taiwan & US only
+MARKET_EXCHANGE = {"tw": "XTAI", "us": "XNYS"}
 
 # Market -> IANA timezone for "today"
 MARKET_TIMEZONE = {
-    "cn": "Asia/Shanghai",
-    "hk": "Asia/Hong_Kong",
-    "us": "America/New_York",
-    "jp": "Asia/Tokyo",
-    "kr": "Asia/Seoul",
     "tw": "Asia/Taipei",
+    "us": "America/New_York",
 }
 
-# P0 market phase baseline (Issue #1386). This is an intentionally small
-# regular-session inference layer; it does not change existing fail-open
-# trading-day filtering or effective-date behavior.
-# tw: TWSE/TPEx run a 13:25-13:30 closing call auction (5 min). JP/KR use
-# regular-session closing auction windows before the 15:30 close (JP 5 min,
-# KR 10 min). Without an entry here .get(market, 0) yields a zero-width
-# window, so the last regular-session minutes stay INTRADAY until POSTMARKET.
 _CLOSING_AUCTION_WINDOW_MINUTES = {
-    "cn": 3,
-    "hk": 10,
-    "us": 5,
-    "jp": 5,
-    "kr": 10,
     "tw": 5,
+    "us": 5,
 }
 _SUPPORTED_ANALYSIS_PHASES = {
     "auto",
@@ -124,27 +109,19 @@ class MarketPhaseContext:
 
 def get_market_for_stock(code: str) -> Optional[str]:
     """
-    Infer market region for a stock code.
-
-    Returns:
-        'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | None (None = unrecognized, fail-open: treat as open)
+    Infer market region for a stock code ('tw' or 'us').
     """
     if not code or not isinstance(code, str):
         return None
     code = (code or "").strip().upper()
 
-    from data_provider import is_us_stock_code, is_us_index_code, is_hk_stock_code
+    from data_provider import is_us_stock_code, is_us_index_code
 
+    suffix_market = get_suffix_market(code)
+    if suffix_market == "tw" or code.endswith((".TW", ".TWO")):
+        return "tw"
     if is_us_stock_code(code) or is_us_index_code(code):
         return "us"
-    if is_hk_stock_code(code):
-        return "hk"
-    suffix_market = get_suffix_market(code)
-    if suffix_market:
-        return suffix_market
-    # A-share: 6-digit numeric
-    if code.isdigit() and len(code) == 6:
-        return "cn"
     return None
 
 
@@ -641,27 +618,27 @@ def compute_effective_region(
     config_region: str, open_markets: Set[str]
 ) -> Optional[str]:
     """
-    Compute effective market review region given config and open markets.
+    Compute effective market review region given config and open markets (Taiwan & US).
 
     Args:
-        config_region: From MARKET_REVIEW_REGION ('cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'both' or comma subset)
+        config_region: From MARKET_REVIEW_REGION ('tw' | 'us' | 'both' or comma subset)
         open_markets: Markets open today
 
     Returns:
         None: caller uses config default (check disabled)
         '': all relevant markets closed, skip market review
-        'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'both': effective subset for today
+        'tw' | 'us' | 'tw,us': effective subset for today
     """
-    markets = ("cn", "hk", "us", "jp", "kr", "tw")
-    normalized = (config_region or "cn").strip().lower()
+    markets = ("tw", "us")
+    normalized = (config_region or "tw").strip().lower()
     if not normalized:
-        normalized = "cn"
+        normalized = "tw"
 
     requested = {
         item.strip() for item in normalized.split(",") if item.strip()
     }
     if not requested:
-        requested = {"cn"}
+        requested = {"tw"}
 
     if "both" in requested:
         requested = set(markets)
@@ -670,8 +647,8 @@ def compute_effective_region(
         requested = {item for item in requested if item in markets}
 
     if not requested:
-        # No valid market token left after filtering; follow parser fallback behavior.
-        requested = {"cn"}
+        # No valid market token left after filtering; default to tw.
+        requested = {"tw"}
 
     # single explicit region: keep single-region return semantics (empty when closed)
     if len(requested) == 1:

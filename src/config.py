@@ -1012,6 +1012,18 @@ class Config:
 
     # === Built-in stock screening ===
     screening_enabled: bool = False
+    tw_screener_enabled: bool = True
+    tw_screener_top_n: int = 20
+    tw_screener_bootstrap_days: int = 22
+
+    # === 新手高門檻防洗版推播與週報設定 ===
+    alert_filter_enabled: bool = True
+    alert_min_buy_score: int = 82
+    alert_max_daily_buy: int = 3
+    alert_cooldown_trading_days: int = 5
+    alert_price_move_threshold_pct: float = 3.0
+    alert_suppress_market_review_push: bool = True
+    finmind_api_token: Optional[str] = None
 
     # === AI 分析配置 ===
     generation_backend: str = LITELLM_BACKEND_ID
@@ -1332,8 +1344,8 @@ class Config:
     run_immediately: bool = True              # 启动时是否立即执行一次（非定时模式）
     market_review_enabled: bool = True        # 是否启用大盘复盘
     daily_market_context_enabled: bool = True   # 是否将大盘环境摘要用于个股分析 Prompt 与保守护栏
-    # 大盘复盘市场区域：cn(A股)、hk(港股)、us(美股)、jp(日股)、kr(韩股)、tw(台股)、both(全部市场)
-    market_review_region: str = "cn"
+    # 市場區域設定：tw（台股）、us（美股）、both（台美雙市場）
+    market_review_region: str = "tw"
     market_review_color_scheme: str = "green_up"
     # 交易日检查：默认启用，非交易日跳过执行；设为 false 或 --force-run 可强制执行（Issue #373）
     trading_day_check_enabled: bool = True
@@ -2347,7 +2359,7 @@ class Config:
             market_review_enabled=os.getenv('MARKET_REVIEW_ENABLED', 'true').lower() == 'true',
             daily_market_context_enabled=os.getenv('DAILY_MARKET_CONTEXT_ENABLED', 'true').lower() == 'true',
             market_review_region=cls._parse_market_review_region(
-                os.getenv('MARKET_REVIEW_REGION', 'cn')
+                os.getenv('MARKET_REVIEW_REGION', 'tw')
             ),
             market_review_color_scheme=cls._parse_market_review_color_scheme(
                 os.getenv('MARKET_REVIEW_COLOR_SCHEME', 'green_up')
@@ -2453,6 +2465,54 @@ class Config:
             ),
             portfolio_fx_update_enabled=os.getenv('PORTFOLIO_FX_UPDATE_ENABLED', 'true').lower() == 'true',
             screening_enabled=parse_env_bool(os.getenv('SCREENING_ENABLED'), default=False),
+            tw_screener_enabled=parse_env_bool(os.getenv('TW_SCREENER_ENABLED'), default=True),
+            tw_screener_top_n=parse_env_int(
+                os.getenv('TW_SCREENER_TOP_N'),
+                20,
+                field_name='TW_SCREENER_TOP_N',
+                minimum=1,
+                maximum=100,
+            ),
+            tw_screener_bootstrap_days=parse_env_int(
+                os.getenv('TW_SCREENER_BOOTSTRAP_DAYS'),
+                22,
+                field_name='TW_SCREENER_BOOTSTRAP_DAYS',
+                minimum=5,
+                maximum=120,
+            ),
+            alert_filter_enabled=parse_env_bool(os.getenv('ALERT_FILTER_ENABLED'), default=True),
+            alert_min_buy_score=parse_env_int(
+                os.getenv('ALERT_MIN_BUY_SCORE'),
+                82,
+                field_name='ALERT_MIN_BUY_SCORE',
+                minimum=0,
+                maximum=100,
+            ),
+            alert_max_daily_buy=parse_env_int(
+                os.getenv('ALERT_MAX_DAILY_BUY'),
+                3,
+                field_name='ALERT_MAX_DAILY_BUY',
+                minimum=1,
+                maximum=20,
+            ),
+            alert_cooldown_trading_days=parse_env_int(
+                os.getenv('ALERT_COOLDOWN_TRADING_DAYS'),
+                5,
+                field_name='ALERT_COOLDOWN_TRADING_DAYS',
+                minimum=0,
+                maximum=30,
+            ),
+            alert_price_move_threshold_pct=parse_env_float(
+                os.getenv('ALERT_PRICE_MOVE_THRESHOLD_PCT'),
+                3.0,
+                field_name='ALERT_PRICE_MOVE_THRESHOLD_PCT',
+                minimum=0.0,
+                maximum=50.0,
+            ),
+            alert_suppress_market_review_push=parse_env_bool(
+                os.getenv('ALERT_SUPPRESS_MARKET_REVIEW_PUSH'), default=True
+            ),
+            finmind_api_token=(os.getenv('FINMIND_API_TOKEN') or '').strip() or None,
         )
     
     @classmethod
@@ -3098,15 +3158,15 @@ class Config:
 
     @classmethod
     def _parse_market_review_region(cls, value: str) -> str:
-        """解析大盘复盘市场区域，非法值记录警告后回退为 cn"""
+        """解析大盤複盤市場區域，非法值記錄警告後回退為 tw"""
         normalized = normalize_market_review_region_lenient(value)
         if normalized is not None:
             return normalized
 
         logging.getLogger(__name__).warning(
-            f"MARKET_REVIEW_REGION 配置值 '{value}' 无效，已回退为默认值 'cn'（合法值：cn / hk / us / jp / kr / tw / both；支持逗号分隔有效值）"
+            f"MARKET_REVIEW_REGION 設定值 '{value}' 無效，已回退為預設值 'tw'（合法值：tw / us / both；支援逗號分隔）"
         )
-        return 'cn'
+        return 'tw'
 
     @classmethod
     def _parse_market_review_color_scheme(cls, value: str) -> str:
@@ -3314,14 +3374,6 @@ class Config:
                     ),
                     field="STOCK_GROUP_N",
                 ))
-
-        # --- Data sources (informational only) ---
-        if not self.tushare_token:
-            issues.append(ConfigIssue(
-                severity="info",
-                message="未配置 Tushare Token，将使用其他数据源",
-                field="TUSHARE_TOKEN",
-            ))
 
         # --- Generation backend selection ---
         generation_backend = (self.generation_backend or LITELLM_BACKEND_ID).strip().lower()

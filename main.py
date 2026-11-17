@@ -299,7 +299,7 @@ def _reload_env_file_values_preserving_overrides() -> None:
 def parse_arguments() -> argparse.Namespace:
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
-        description='A股自选股智能分析系统',
+        description='台美股雙軌量化智能分析系統',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 示例:
@@ -476,6 +476,32 @@ def parse_arguments() -> argparse.Namespace:
         help='运行 ETF 轮动：输出最新调仓信号与规则回测报告（不调用 LLM，配置见 ETF_ROTATION_*）'
     )
 
+    parser.add_argument(
+        '--no-tw-screener',
+        action='store_true',
+        help='跳过台股全市场量化初筛合并，仅使用固定观察名单'
+    )
+
+    parser.add_argument(
+        '--market',
+        type=str.lower,
+        choices=('all', 'tw', 'us'),
+        default='all',
+        help='僅執行指定市場標的：tw（台股與台股 ETF）、us（美股與美股 ETF）、all（預設全市場）'
+    )
+
+    parser.add_argument(
+        '--weekly-report',
+        action='store_true',
+        help='產出本週「每週投資紀律週報」並發送推播通知'
+    )
+
+    parser.add_argument(
+        '--auto-weekly-report',
+        action='store_true',
+        help='若今日為台北時間週五，分析結束後自動產出並推播「每週投資紀律週報」'
+    )
+
     return parser.parse_args()
 
 
@@ -638,6 +664,94 @@ def _refresh_stock_index_cache_for_analysis(config: Config) -> None:
             logger.debug("[stock-index] 分析前刷新未完成，继续使用本地索引: %s", result.error)
     except Exception as exc:  # noqa: BLE001 - stock index freshness must not block analysis.
         logger.warning("[stock-index] 分析前刷新股票索引失败，继续执行分析: %s", exc)
+
+
+def _filter_codes_for_market(
+    stock_codes: Sequence[str],
+    market_scope: str,
+    analysis_targets: Optional[List[AnalysisTarget]] = None,
+) -> Tuple[List[str], Optional[List[AnalysisTarget]]]:
+    """Filter stock codes (and aligned AnalysisTarget list) by ``all`` / ``tw`` / ``us``."""
+    scope = (market_scope or "all").strip().lower()
+    codes_list = list(stock_codes or [])
+    if scope not in ("tw", "us"):
+        return codes_list, analysis_targets
+
+    from src.core.trading_calendar import get_market_for_stock
+
+    filtered_codes: List[str] = []
+    filtered_targets: Optional[List[AnalysisTarget]] = [] if analysis_targets is not None else None
+    for idx, code in enumerate(codes_list):
+        mkt = get_market_for_stock(code)
+        if mkt == scope:
+            filtered_codes.append(code)
+            if filtered_targets is not None and analysis_targets is not None and idx < len(analysis_targets):
+                filtered_targets.append(analysis_targets[idx])
+    return filtered_codes, filtered_targets
+
+
+def _merge_with_tw_screener_targets(
+    config: Config,
+    args: argparse.Namespace,
+    base_codes: List[str],
+    analysis_targets: Optional[List[AnalysisTarget]] = None,
+) -> Tuple[List[str], Optional[List[AnalysisTarget]]]:
+    """Merge fixed watchlist codes with Top N Taiwan market screened stocks (fail-open)."""
+    market_scope = str(getattr(args, "market", "all") or "all").strip().lower()
+    if (
+        market_scope == "us"
+        or getattr(args, "no_tw_screener", False)
+        or not getattr(config, "tw_screener_enabled", False)
+    ):
+        return base_codes, analysis_targets
+
+    try:
+        from screener.tw_market_screener import (
+            get_top_tw_screened_stocks,
+            merge_watchlist_with_screened,
+        )
+
+        top_n = getattr(config, "tw_screener_top_n", 20)
+        bootstrap_days = getattr(config, "tw_screener_bootstrap_days", 22)
+        logger.info(
+            "[TWMarketScreener] 啟動台股全市場盤後量化初篩 (Top %d)...",
+            top_n,
+        )
+        screened_codes = get_top_tw_screened_stocks(
+            top_n=top_n,
+            bootstrap_days=bootstrap_days,
+        )
+        if not screened_codes:
+            logger.warning("[TWMarketScreener] 未篩選出額外台股標的，維持原固定觀察名單: %s", base_codes)
+            return base_codes, analysis_targets
+
+        merged_codes = merge_watchlist_with_screened(base_codes, screened_codes)
+        logger.info(
+            "[TWMarketScreener] 觀察名單合併完成 | 固定觀察名單(%d檔): %s | 初篩Top%d(%d檔): %s | 合併後總計(%d檔): %s",
+            len(base_codes),
+            base_codes,
+            top_n,
+            len(screened_codes),
+            screened_codes,
+            len(merged_codes),
+            merged_codes,
+        )
+
+        if analysis_targets is not None:
+            existing_map = {
+                (canonical_stock_code(c) or c.upper()): t
+                for c, t in zip(base_codes, analysis_targets)
+            }
+            merged_targets = [
+                existing_map.get(code) or parse_analysis_target(code)
+                for code in merged_codes
+            ]
+            return merged_codes, merged_targets
+
+        return merged_codes, None
+    except Exception as exc:  # noqa: BLE001 - fail-open so main pipeline never crashes
+        logger.warning("[TWMarketScreener] 台股初篩執行異常，降級僅使用固定觀察名單: %s", exc)
+        return base_codes, analysis_targets
 
 
 def _resolve_portfolio_stock_codes(args: argparse.Namespace) -> Optional[List[str]]:
@@ -885,6 +999,53 @@ def _run_auto_backtest(config: Config) -> None:
         logger.warning(f"自动回测失败（已忽略）: {exc}")
 
 
+def run_weekly_discipline_report(
+    config: Config,
+    *,
+    send_notification: bool = True,
+    reference_date: Optional[date] = None,
+) -> Optional[str]:
+    """Generate, save, and push the Friday Weekly Investment Discipline Report ('每週投資紀律週報')."""
+    from zoneinfo import ZoneInfo
+    from src.notification import NotificationService
+    from utils.alert_state import AlertStateManager, generate_weekly_discipline_report
+
+    ref_date = reference_date or datetime.now(ZoneInfo("Asia/Taipei")).date()
+    mgr = AlertStateManager()
+    weekly_md = generate_weekly_discipline_report(
+        state_manager=mgr,
+        reference_date=ref_date,
+        watchlist_codes=list(getattr(config, "stock_list", None) or []),
+    )
+
+    notifier = NotificationService()
+    date_compact = ref_date.strftime("%Y%m%d")
+    report_filename = f"weekly_report_{date_compact}.md"
+    try:
+        saved_path = notifier.save_report_to_file(weekly_md, filename=report_filename)
+        logger.info("[WeeklyReport] 每週投資紀律週報已儲存: %s", saved_path)
+    except Exception as exc:
+        logger.warning("[WeeklyReport] 儲存週報失敗: %s", exc)
+        saved_path = None
+
+    if send_notification and notifier.is_available():
+        ok = notifier.send(
+            weekly_md,
+            email_send_to_all=True,
+            route_type="report",
+            severity="info",
+            dedup_key=f"weekly_discipline:{date_compact}",
+        )
+        if ok:
+            logger.info("[WeeklyReport] 每週投資紀律週報推播成功")
+        else:
+            logger.warning("[WeeklyReport] 每週投資紀律週報推播失敗")
+    elif send_notification:
+        logger.info("[WeeklyReport] 未設定通知管道，僅儲存每週投資紀律週報至本地檔案")
+
+    return saved_path or weekly_md
+
+
 def _all_stock_targets_succeeded(
     stock_codes: Optional[List[str]],
     results: List[Any],
@@ -975,8 +1136,25 @@ def run_full_analysis(
         if stock_codes is None and portfolio_stock_codes is None and refresh_watchlist:
             config.refresh_stock_list()
 
-        using_config_stock_list = stock_codes is None and portfolio_stock_codes is None
+        using_config_stock_list = (
+            (stock_codes is None or (os.getenv("GITHUB_ACTIONS") == "true" and not getattr(args, "stocks", None)))
+            and portfolio_stock_codes is None
+        )
         effective_codes = stock_codes if stock_codes is not None else config.stock_list
+        if using_config_stock_list:
+            effective_codes, analysis_targets = _merge_with_tw_screener_targets(
+                config,
+                args,
+                list(effective_codes or []),
+                analysis_targets=analysis_targets,
+            )
+
+        market_scope = str(getattr(args, "market", "all") or "all").strip().lower()
+        effective_codes, analysis_targets = _filter_codes_for_market(
+            list(effective_codes or []),
+            market_scope,
+            analysis_targets=analysis_targets,
+        )
         # Fail fast on an empty persisted watchlist before trading-day filtering.
         # Otherwise should_skip=True would mask the configuration error as success.
         if (
@@ -1045,14 +1223,22 @@ def run_full_analysis(
             save_context_snapshot = False
         query_id = uuid.uuid4().hex
         market_review_region = (
-            effective_region
-            if effective_region is not None
-            else (getattr(config, 'market_review_region', 'cn') or 'cn')
+            market_scope
+            if market_scope in ("tw", "us") and (effective_region is None or market_scope in str(effective_region).split(","))
+            else (
+                effective_region
+                if effective_region is not None
+                else (getattr(config, 'market_review_region', 'tw') or 'tw')
+            )
         )
         should_run_market_review = (
             config.market_review_enabled
             and not args.no_market_review
             and (market_review_region or '') != ''
+        )
+        suppress_mr_notify = bool(
+            getattr(config, 'alert_filter_enabled', True)
+            and getattr(config, 'alert_suppress_market_review_push', True)
         )
         if (
             not getattr(args, "dry_run", False)
@@ -1088,6 +1274,7 @@ def run_full_analysis(
             save_context_snapshot=save_context_snapshot,
             daily_market_context_enabled=should_use_daily_market_context,
             daily_market_context_allow_generate=should_use_daily_market_context,
+            market_scope=market_scope,
         )
         if should_use_daily_market_context:
             # Prompt-side context can reuse historical summaries, while full-merge
@@ -1188,6 +1375,7 @@ def run_full_analysis(
                     market_context_generated_during_stock
                     and not merge_notification
                     and not args.no_notify
+                    and not suppress_mr_notify
                     and pipeline.notifier.is_available()
                 ):
                     if pipeline.notifier.send(
@@ -1211,7 +1399,7 @@ def run_full_analysis(
                     notifier=pipeline.notifier,
                     analyzer=pipeline.analyzer,
                     search_service=pipeline.search_service,
-                    send_notification=not args.no_notify,
+                    send_notification=(not args.no_notify) and (not suppress_mr_notify),
                     merge_notification=merge_notification,
                     override_region=market_review_region,
                     query_id=query_id,
@@ -1272,8 +1460,8 @@ def run_full_analysis(
             )
             return _return_with_auto_backtest(False)
 
-        # Issue #190: 合并推送（个股+大盘复盘）
-        if merge_notification and (results or market_report) and not args.no_notify:
+        # Issue #190: 合并推送（个股+大盘复盘；啟用高門檻精選過濾時略過未過濾之雜訊合併推播）
+        if merge_notification and not suppress_mr_notify and (results or market_report) and not args.no_notify:
             parts = []
             if market_report:
                 parts.append(f"# 📈 大盘复盘\n\n{market_report}")
@@ -1610,6 +1798,7 @@ def _skips_stock_entry(args: argparse.Namespace, config: Config) -> bool:
         getattr(args, "backtest", False)
         or getattr(args, "etf_rotation", False)
         or getattr(args, "market_review", False)
+        or getattr(args, "weekly_report", False)
         or getattr(args, "serve_only", False)
         or getattr(args, "webui_only", False)
         or bool(getattr(args, "portfolio", None))
@@ -1732,7 +1921,7 @@ def main() -> int:
         return 1
 
     logger.info("=" * 60)
-    logger.info("A股自选股智能分析系统 启动")
+    logger.info("台美股雙軌量化智能分析系統 啟動")
     logger.info(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 60)
 
@@ -1915,6 +2104,15 @@ def main() -> int:
             logger.info(
                 "ETF 轮动完成: as_of=%s target=%s failed=%s",
                 f"{report.as_of:%Y-%m-%d}", report.target_weights, list(report.failed_codes),
+            )
+            return 0
+
+        # 模式0.8: 每週投資紀律週報（獨立產出並推播）
+        if getattr(args, 'weekly_report', False):
+            logger.info("模式: 每週投資紀律週報 (Weekly Investment Discipline Report)")
+            run_weekly_discipline_report(
+                config,
+                send_notification=not args.no_notify,
             )
             return 0
 
@@ -2118,6 +2316,17 @@ def main() -> int:
                         "report_save_failed",
                     }:
                         return 1
+            if getattr(args, "auto_weekly_report", False):
+                from zoneinfo import ZoneInfo
+
+                tw_today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+                if tw_today.weekday() == 4:  # Friday in Asia/Taipei
+                    logger.info("偵測為台北時間週五盤後，自動產出每週投資紀律週報...")
+                    run_weekly_discipline_report(
+                        config,
+                        send_notification=not args.no_notify,
+                        reference_date=tw_today,
+                    )
         else:
             logger.info("配置为不立即运行分析 (RUN_IMMEDIATELY=false)")
 

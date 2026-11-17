@@ -101,22 +101,14 @@ TW_PROFILE = MarketProfile(
         "Taiwan stock market TAIEX TPEx",
         "台股 半導體 台積電 市場新聞",
     ],
-    prompt_index_hint="分析台湾加权指数、柜买指数走势；缺失指数时说明覆盖范围，不推断未提供的行情",
+    prompt_index_hint="分析台灣加權指數、櫃買指數走勢；缺失指數時說明覆蓋範圍，不推斷未提供的行情",
     has_market_stats=False,
     has_sector_rankings=False,
 )
 
 
 def get_profile(region: str) -> MarketProfile:
-    """根据 region 返回对应的 MarketProfile"""
+    """根據 region 返回對應的 MarketProfile（僅支援台股 tw / 美股 us）"""
     if region == "us":
         return US_PROFILE
-    if region == "hk":
-        return HK_PROFILE
-    if region == "jp":
-        return JP_PROFILE
-    if region == "kr":
-        return KR_PROFILE
-    if region == "tw":
-        return TW_PROFILE
-    return CN_PROFILE
+    return TW_PROFILE
