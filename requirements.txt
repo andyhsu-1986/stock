@@ -8,6 +8,7 @@ tenacity>=8.2.0             # Retry support with exponential backoff
 sqlalchemy>=2.0.0           # ORM database access
 schedule>=1.2.0             # Scheduled task runner
 exchange-calendars>=4.13.0   # Trading calendars (XTAI Taiwan / XNYS US)
+tzdata>=2024.1               # Cross-platform IANA timezone database (Windows/Linux)
 
 # Taiwan & US Market Data Sources
 yfinance>=0.2.0             # Yahoo Finance (TW & US daily bars, dividends, quotes)

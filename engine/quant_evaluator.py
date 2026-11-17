@@ -29,6 +29,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
+
+
+def _taipei_today() -> date:
+    """Return current calendar date in Asia/Taipei regardless of host OS timezone."""
+    return datetime.now(ZoneInfo("Asia/Taipei")).date()
 
 import numpy as np
 import pandas as pd
@@ -486,9 +492,10 @@ class QuantEvaluator:
         Only queries FinMind API if cache is missing or older than 90 days (quarterly check).
         """
         cache_df = self._load_fundamentals_cache()
-        today_str = date.today().strftime("%Y-%m-%d")
+        today_tw = _taipei_today()
+        today_str = today_tw.strftime("%Y-%m-%d")
         cutoff_date = (
-            date.today() - timedelta(days=self.weights.fundamentals_cache_ttl_days)
+            today_tw - timedelta(days=self.weights.fundamentals_cache_ttl_days)
         ).strftime("%Y-%m-%d")
 
         if not cache_df.empty and "code" in cache_df.columns:
@@ -500,8 +507,8 @@ class QuantEvaluator:
                     return row.to_dict()
 
         # Fetch from FinMind API (3-5 years)
-        start_5y = (date.today() - timedelta(days=365 * 5 + 30)).strftime("%Y-%m-%d")
-        start_4y = (date.today() - timedelta(days=365 * 4 + 30)).strftime("%Y-%m-%d")
+        start_5y = (today_tw - timedelta(days=365 * 5 + 30)).strftime("%Y-%m-%d")
+        start_4y = (today_tw - timedelta(days=365 * 4 + 30)).strftime("%Y-%m-%d")
 
         fin_metrics = self._fetch_finmind_stock_metrics(bare_code, start_4y=start_4y, start_5y=start_5y)
         fin_metrics["code"] = str(bare_code)
@@ -780,7 +787,7 @@ class QuantEvaluator:
             asset_track=asset_track,
             is_etf=is_etf,
             currency=currency,
-            as_of_date=date.today().strftime("%Y-%m-%d"),
+            as_of_date=_taipei_today().strftime("%Y-%m-%d"),
             current_price=round(current_price, 2),
             ma5=stab["ma5"],
             prev_ma5=stab["prev_ma5"],

@@ -41,3 +41,8 @@ Makefile text eol=lf
 *.crt binary
 *.key binary
 *.p12 binary
+*.parquet binary
+*.db binary
+*.sqlite binary
+*.yml text eol=lf
+*.yaml text eol=lf

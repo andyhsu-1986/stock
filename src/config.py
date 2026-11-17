@@ -1072,8 +1072,8 @@ class Config:
 
     # Legacy single-key fields (kept for backward compatibility; gemini_api_keys[0] when set)
     gemini_api_key: Optional[str] = None
-    gemini_model: str = "gemini-3.6-flash"  # 主模型
-    gemini_model_fallback: str = "gemini-3.5-flash-lite"  # 备选模型
+    gemini_model: str = "gemini-3.8-flash"  # 主模型
+    gemini_model_fallback: str = "gemini-4-hydrogen"  # 备选模型
     gemini_temperature: float = 0.7  # 温度参数（0.0-2.0，控制输出随机性，默认0.7）
 
     # Gemini API 请求配置（防止 429 限流）
@@ -1728,7 +1728,7 @@ class Config:
                 llm_models_source = "legacy_env"
 
             if not litellm_model:
-                _gemini_model_name = os.getenv('GEMINI_MODEL', 'gemini-3.6-flash').strip()
+                _gemini_model_name = os.getenv('GEMINI_MODEL', 'gemini-3.8-flash').strip()
                 _anthropic_model_name = os.getenv('ANTHROPIC_MODEL', 'claude-sonnet-4-6').strip()
                 if gemini_api_keys:
                     litellm_model = f'gemini/{_gemini_model_name}'
@@ -1745,7 +1745,7 @@ class Config:
 
             if not litellm_fallback_models and not litellm_fallback_models_explicit:
                 # Backward compat: use gemini_model_fallback when primary is gemini
-                _gemini_fallback = os.getenv('GEMINI_MODEL_FALLBACK', 'gemini-3.5-flash-lite').strip()
+                _gemini_fallback = os.getenv('GEMINI_MODEL_FALLBACK', 'gemini-4-hydrogen').strip()
                 if litellm_model.startswith('gemini/') and _gemini_fallback:
                     _fb = f'gemini/{_gemini_fallback}' if '/' not in _gemini_fallback else _gemini_fallback
                     litellm_fallback_models = [_fb]

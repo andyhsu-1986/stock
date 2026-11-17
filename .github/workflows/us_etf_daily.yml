@@ -26,6 +26,10 @@ jobs:
     name: 美股與美股 ETF 觀察名單 + 總經新聞分析
     runs-on: ubuntu-latest
     timeout-minutes: ${{ fromJSON(vars.ANALYSIS_TIMEOUT_MINUTES || '20') }}
+    env:
+      TZ: 'Asia/Taipei'
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
 
     steps:
       - name: 檢出程式碼
@@ -63,8 +67,8 @@ jobs:
           LITELLM_FALLBACK_MODELS: ${{ vars.LITELLM_FALLBACK_MODELS || secrets.LITELLM_FALLBACK_MODELS }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3.6-flash' }}
-          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || 'gemini-3.5-flash-lite' }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3.8-flash' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || 'gemini-4-hydrogen' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_API_KEYS: ${{ secrets.OPENAI_API_KEYS }}
           OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
@@ -130,7 +134,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || git rebase --abort || true
 
           shopt -s nullglob
           FILES_TO_ADD=()

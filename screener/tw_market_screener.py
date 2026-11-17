@@ -22,6 +22,12 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo
+
+
+def _taipei_today() -> date:
+    """Return current calendar date in Asia/Taipei regardless of host OS timezone."""
+    return datetime.now(ZoneInfo("Asia/Taipei")).date()
 
 import numpy as np
 import pandas as pd
@@ -286,7 +292,7 @@ class TWMarketScreener:
         new_df: pd.DataFrame,
         reference_date: Optional[date] = None,
     ) -> pd.DataFrame:
-        ref = reference_date or date.today()
+        ref = reference_date or _taipei_today()
         cutoff_str = (ref - timedelta(days=365 * self.retention_years)).strftime("%Y-%m-%d")
 
         frames = [df for df in (existing_df, new_df) if df is not None and not df.empty]
