@@ -3965,7 +3965,10 @@ class StockAnalysisPipeline:
             self._refresh_saved_diagnostic_snapshot(results=results, notification_run=notification_run)
             return
 
-        has_risk_alert = any(getattr(d, "trigger_type", "") in ("stop_loss", "take_profit") for d in pushed)
+        has_risk_alert = any(
+            getattr(d, "trigger_type", "") in ("stop_loss", "take_profit", "broken_ma20_exit")
+            for d in pushed
+        )
         sent = self.notifier.send(
             digest,
             email_send_to_all=True,

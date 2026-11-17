@@ -89,8 +89,10 @@ class AlertDecision:
     reasons: List[str] = field(default_factory=list)
     risk_notes: List[str] = field(default_factory=list)
 
-    trigger_type: Optional[str] = None   # "high_confidence_buy" | "stop_loss" | "take_profit" | None
-    state_label: str = "持有"            # "買入" | "觸及停損" | "觸及停利" | "持有" | "賣出"
+    trigger_type: Optional[str] = None   # "high_confidence_buy" | "stop_loss" | "take_profit" | "broken_ma20_exit" | None
+    state_label: str = "持有"            # "買入" | "觸及停損" | "觸及停利" | "破月線三日出場" | "持有" | "賣出"
+    three_condition_resonance: bool = False
+    broken_ma20_3d: bool = False
     should_push: bool = False
     skip_reason_code: str = ""           # "" | "below_threshold" | "antispam_cooldown" | "daily_buy_cap"
     skip_reason_desc: str = ""
@@ -174,6 +176,19 @@ def _extract_plain_reasons(
         bullets.append(
             f"現價 **{current_price} {currency}** 已達成波段停利目標 **{swing_take_profit} {currency}**，"
             "建議分批獲利入袋或將移動停損點上調保護既得獲利。"
+        )
+    elif trigger_type == "broken_ma20_exit":
+        ma20_val = quant_eval.get("ma20") or 0.0
+        bullets.append(
+            f"股價（現價 **{current_price} {currency}**）已**連續 3 個交易日收盤跌破 20 日均線（{ma20_val} {currency}）站不回**，"
+            "依策略出場紀律建議果斷減碼或出場。"
+        )
+
+    if quant_eval.get("three_condition_resonance"):
+        osc_val = quant_eval.get("macd_osc", 0.0)
+        bw_val = quant_eval.get("bb_bandwidth_pct", 0.0)
+        bullets.append(
+            f"⚡ **三條件共振起漲**：MACD柱狀體翻正（`{osc_val}`）＋ 布林雙向開口放大（帶寬 `{bw_val}%`）＋ 站上上揚20日均線。"
         )
 
     # Pull quantitative plain-English highlights
@@ -325,7 +340,11 @@ class AlertStateManager:
 
         # Determine high-threshold trigger eligibility:
         # 1. Price hit Stop-Loss (<= dynamic_stop_loss) or Take-Profit (>= swing_take_profit)
-        # 2. Advice == "買入" AND score >= 82
+        # 2. Broken below 20MA for 3 consecutive trading days (broken_ma20_3d)
+        # 3. Advice == "買入" AND score >= 82
+        three_cond_res = bool(quant_eval.get("three_condition_resonance", False))
+        is_etf_asset = bool(quant_eval.get("is_etf", False))
+        broken_ma20_3d = bool(quant_eval.get("broken_ma20_3d", False) and not is_etf_asset)
         trigger_type: Optional[str] = None
         state_label = advice
         if current_price > 0 and dynamic_stop_loss > 0 and current_price <= dynamic_stop_loss:
@@ -334,6 +353,9 @@ class AlertStateManager:
         elif current_price > 0 and swing_take_profit > 0 and current_price >= swing_take_profit:
             trigger_type = "take_profit"
             state_label = "觸及停利"
+        elif broken_ma20_3d:
+            trigger_type = "broken_ma20_exit"
+            state_label = "破月線三日出場"
         elif advice == "買入" and score >= self.config.min_buy_score:
             trigger_type = "high_confidence_buy"
             state_label = "買入"
@@ -368,6 +390,8 @@ class AlertStateManager:
             risk_notes=risk_notes,
             trigger_type=trigger_type,
             state_label=state_label,
+            three_condition_resonance=three_cond_res,
+            broken_ma20_3d=broken_ma20_3d,
         )
 
         if trigger_type is None:
@@ -537,8 +561,12 @@ def format_curated_alert_card(d: AlertDecision) -> str:
     """Render a beginner-friendly Traditional Chinese alert card for Telegram/Discord."""
     if d.trigger_type == "stop_loss":
         badge = f"🚨 【觸及停損警戒】{d.name} ({d.symbol})"
+    elif d.trigger_type == "broken_ma20_exit":
+        badge = f"🚨 【破20日線三日出場警戒】{d.name} ({d.symbol})"
     elif d.trigger_type == "take_profit":
         badge = f"🎊 【觸及停利目標】{d.name} ({d.symbol})"
+    elif d.three_condition_resonance:
+        badge = f"⚡ 【三條件共振・高信心買入】{d.name} ({d.symbol})"
     else:
         badge = f"🟢 【高信心買入精選】{d.name} ({d.symbol})"
 
@@ -580,7 +608,7 @@ def format_curated_alert_digest(
     dt_str = report_date or datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
     pushed = list(pushed_decisions or [])
     buy_cnt = sum(1 for d in pushed if d.trigger_type == "high_confidence_buy")
-    risk_cnt = sum(1 for d in pushed if d.trigger_type in ("stop_loss", "take_profit"))
+    risk_cnt = sum(1 for d in pushed if d.trigger_type in ("stop_loss", "take_profit", "broken_ma20_exit"))
     suppressed_cnt = sum(
         1 for d in (all_decisions or []) if not d.should_push
     )

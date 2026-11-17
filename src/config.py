@@ -1744,11 +1744,14 @@ class Config:
                         litellm_model = _openai_model_name
 
             if not litellm_fallback_models and not litellm_fallback_models_explicit:
-                # Backward compat: use gemini_model_fallback when primary is gemini
-                _gemini_fallback = os.getenv('GEMINI_MODEL_FALLBACK', 'gemini-4-hydrogen').strip()
+                # Backward compat: use gemini_model_fallback when primary is gemini (supports comma-separated list)
+                _gemini_fallback = os.getenv('GEMINI_MODEL_FALLBACK', 'gemini-4-hydrogen,gemini-2.5-flash').strip()
                 if litellm_model.startswith('gemini/') and _gemini_fallback:
-                    _fb = f'gemini/{_gemini_fallback}' if '/' not in _gemini_fallback else _gemini_fallback
-                    litellm_fallback_models = [_fb]
+                    litellm_fallback_models = []
+                    for _part in [p.strip() for p in _gemini_fallback.split(',') if p.strip()]:
+                        _fb = f'gemini/{_part}' if '/' not in _part else _part
+                        if _fb not in litellm_fallback_models and _fb != litellm_model:
+                            litellm_fallback_models.append(_fb)
 
         generation_backend = (
             os.getenv('GENERATION_BACKEND', LITELLM_BACKEND_ID).strip().lower()

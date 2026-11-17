@@ -24,6 +24,7 @@ from engine.quant_evaluator import (
     compute_gross_margin_slope_4q,
     compute_revenue_cagr_3y,
     compute_weighted_confidence_score,
+    compute_xq_three_conditions,
     format_quant_evaluation_prompt_block,
 )
 from src.analyzer import AnalysisResult, GeminiAnalyzer
@@ -131,6 +132,42 @@ class QuantEvaluatorAndTraditionalChineseTestCase(unittest.TestCase):
         self.assertTrue(stab_ok["ma5_stabilized"])
         self.assertTrue(stab_ok["no_new_low_3d"])
         self.assertTrue(stab_ok["bottom_stabilized"])
+
+        # 3c. XQ Three-Condition Resonance (WeightedClose MACD flip + BB dual expansion + Rising MA20) & 3D Exit
+        # Build a base series where 20MA is rising over the last 3 bars, MACD flips from negative to positive,
+        # and Bollinger Upper rises while Lower falls (dual-sided expansion)
+        closes_breakout = (
+            [98.0] * 20
+            + [100.5] * 10
+            + [99.8] * 8
+            + [100.0, 106.0]
+        )
+        df_breakout = pd.DataFrame(
+            {
+                "high": [c * 1.01 for c in closes_breakout],
+                "low": [c * 0.99 for c in closes_breakout],
+                "close": closes_breakout,
+            }
+        )
+        xq_break = compute_xq_three_conditions(df_breakout, ma_up_bars=3, macd_flip_lookback=2)
+        self.assertTrue(xq_break["macd_flipped_positive"])
+        self.assertTrue(xq_break["bb_expanding"])
+        self.assertTrue(xq_break["above_rising_ma20"])
+        self.assertTrue(xq_break["three_condition_resonance"])
+        self.assertFalse(xq_break["broken_ma20_3d"])
+
+        # Build a breakdown series where the last 3 closes are strictly below MA20
+        closes_breakdown = [100.0] * 30 + [95.0, 94.0, 93.0]
+        df_breakdown = pd.DataFrame(
+            {
+                "high": [c * 1.01 for c in closes_breakdown],
+                "low": [c * 0.99 for c in closes_breakdown],
+                "close": closes_breakdown,
+            }
+        )
+        xq_exit = compute_xq_three_conditions(df_breakdown)
+        self.assertTrue(xq_exit["broken_ma20_3d"])
+        self.assertFalse(xq_exit["three_condition_resonance"])
 
         # 4. 35/25/20/20 Weighted Confidence Score & ETF Premium > 1.5% Downgrade
         score_normal, advice_normal = compute_weighted_confidence_score(

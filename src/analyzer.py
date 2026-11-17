@@ -4218,10 +4218,11 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
             if backend_id not in LOCAL_CLI_GENERATION_BACKEND_IDS:
                 logger.debug(f"=== 完整 Prompt ({len(prompt)}字符) ===\n{prompt}\n=== End Prompt ===")
 
-            # 设置生成配置
+            # 设置生成配置（設定單次呼叫 timeout 45s 避免雲端排程因單一請求 503 卡死超時）
             generation_config = {
                 "temperature": config.llm_temperature,
                 "max_output_tokens": 8192,
+                "timeout": 45,
             }
 
             logger.info(f"[LLM调用] 开始调用 {model_name}...")
@@ -4384,6 +4385,9 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
         t_score = float(quant_eval.get("technical_score", 50.0))
         c_score = float(quant_eval.get("chip_macro_score", 50.0))
         prem_flag = bool(quant_eval.get("etf_premium_risk_flag", False))
+        is_etf_flag = bool(quant_eval.get("is_etf", False))
+        broken_3d_flag = bool(quant_eval.get("broken_ma20_3d", False) and not is_etf_flag)
+        three_cond_flag = bool(quant_eval.get("three_condition_resonance", False))
 
         final_score, final_advice = compute_weighted_confidence_score(
             fundamental_score=f_score,
@@ -4392,12 +4396,23 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
             ai_news_score=ai_news_score,
             etf_premium_risk_flag=prem_flag,
         )
+        if broken_3d_flag:
+            final_advice = "賣出"
+            final_score = min(final_score, 45)
 
         result.sentiment_score = final_score
         result.operation_advice = final_advice
         result.decision_type = (
             "buy" if final_advice == "買入" else ("sell" if final_advice == "賣出" else "hold")
         )
+        if broken_3d_flag:
+            exit_msg = quant_eval.get("exit_signal_desc") or "股價已連續 3 日收盤跌破 20 日均線站不回，觸發趨勢出場條件"
+            intel = dash.setdefault("intelligence", {})
+            if isinstance(intel, dict):
+                alerts = list(intel.get("risk_alerts") or [])
+                if not any("連續 3" in str(a) or "破線三日" in str(a) for a in alerts):
+                    alerts.insert(0, exit_msg)
+                intel["risk_alerts"] = alerts
         if prem_flag:
             prem_pct = quant_eval.get("etf_premium_discount_pct")
             reason_msg = f"台股 ETF 即時溢價率 ({prem_pct}%) 超過 1.5% 警戒線，強制降級買入建議為持有"
@@ -4440,9 +4455,15 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
             "technical_indicators": int(round(t_score)),
             "market_conditions": int(round(c_score)),
             "news_sentiment": int(round(ai_news_score)),
-            "strongest_bullish_signal": sig_attr.get("strongest_bullish_signal") or "雙軌量化估值與均線支撐",
+            "strongest_bullish_signal": sig_attr.get("strongest_bullish_signal") or (
+                "⚡三條件共振（MACD翻正+布林雙向開口+站上上揚月線）"
+                if three_cond_flag
+                else "雙軌量化估值與均線支撐"
+            ),
             "strongest_bearish_signal": sig_attr.get("strongest_bearish_signal") or (
-                "台股 ETF 溢價過高風險 (>1.5%)" if prem_flag else "ATR 波動停損風控約束"
+                "🚨跌破20日均線連3日站不回出場訊號"
+                if broken_3d_flag
+                else ("台股 ETF 溢價過高風險 (>1.5%)" if prem_flag else "ATR 波動停損風控約束")
             ),
         }
         result.dashboard = dash

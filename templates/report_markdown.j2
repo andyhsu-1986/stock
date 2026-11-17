@@ -90,6 +90,8 @@
 | 🎯 **第一買點（順勢拉回）** | **{{ quant_eval.get('buy_point_1', 'N/A') }} {{ quant_eval.get('currency', '') }}** | MA20 ({{ quant_eval.get('ma20', 'N/A') }}) 與估值區間定錨（建議首波試單 30% 資金） |
 | 🔵 **第二買點（價值支撐）** | **{{ quant_eval.get('buy_point_2', 'N/A') }} {{ quant_eval.get('currency', '') }}** | MA60 ({{ quant_eval.get('ma60', 'N/A') }}) 定錨 ｜ {{ quant_eval.get('buy_point_2_status', '') }} |
 | 🛑 **動態移動停損價** | **{{ quant_eval.get('dynamic_stop_loss', 'N/A') }} {{ quant_eval.get('currency', '') }}** | 取「20日高點-2.5×ATR ({{ quant_eval.get('atr_stop_loss', 'N/A') }})」與「買入參考價往下 8% ({{ quant_eval.get('hard_cap_stop_loss', 'N/A') }})」較高者 |
+| 🚨 **破20日線三日出場檢核** | **{{ '🚨 觸發出場' if quant_eval.get('broken_ma20_3d') else '✅ 正常' }}** | {{ quant_eval.get('exit_signal_desc') or '未連續 3 日收盤跌破 20 日均線' }} |
+| ⚡ **三條件共振檢核 (動能/波動/趨勢)** | **{{ '✅ 成立' if quant_eval.get('three_condition_resonance') else '未同時成立' }}** | {{ quant_eval.get('three_condition_status', 'N/A') }} |
 | 🎊 **波段停利參考價** | **{{ quant_eval.get('swing_take_profit', 'N/A') }} {{ quant_eval.get('currency', '') }}** | 波段風險報酬比目標價 |
 | 💰 **分批進場資金比例建議** | **30% / 40% / 30%** | {{ quant_eval.get('position_sizing_advice', '首波試單 30% 資金') }} |
 {% if quant_eval.get('is_etf') %}

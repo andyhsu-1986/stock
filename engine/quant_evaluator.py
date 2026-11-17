@@ -133,6 +133,25 @@ class QuantEvaluationResult:
     bottom_stabilized: bool = False
     buy_point_2_status: str = ""
 
+    # XQ 三條件共振策略（動能 MACD 翻正 + 波動布林雙向真開口 + 趨勢站上上揚 20MA）與破線三日出場
+    macd_dif: float = 0.0
+    macd_dea: float = 0.0
+    macd_osc: float = 0.0
+    prev_macd_osc: float = 0.0
+    macd_just_flipped_today: bool = False
+    macd_flipped_positive: bool = False
+    bb_upper: float = 0.0
+    bb_lower: float = 0.0
+    bb_bandwidth_pct: float = 0.0
+    prev_bb_bandwidth_pct: float = 0.0
+    bb_expanding: bool = False
+    ma20_rising: bool = False
+    above_rising_ma20: bool = False
+    three_condition_resonance: bool = False
+    three_condition_status: str = ""
+    broken_ma20_3d: bool = False
+    exit_signal_desc: str = ""
+
     # 新手友善分批資金配置與白話指標說明
     position_sizing_advice: str = ""
     plain_indicator_explanations: List[str] = field(default_factory=list)
@@ -223,6 +242,159 @@ def check_bottom_stabilization(df: pd.DataFrame) -> Dict[str, Any]:
         "ma5_stabilized": ma5_stabilized,
         "no_new_low_3d": no_new_low_3d,
         "bottom_stabilized": bool(ma5_stabilized and no_new_low_3d),
+    }
+
+
+def compute_xq_three_conditions(
+    df: pd.DataFrame,
+    *,
+    fast_len: int = 12,
+    slow_len: int = 26,
+    sig_len: int = 9,
+    bb_len: int = 20,
+    bb_k: float = 2.0,
+    ma_len: int = 20,
+    ma_up_bars: int = 3,
+    macd_flip_lookback: int = 2,
+) -> Dict[str, Any]:
+    """
+    Compute the XQ Three-Condition Resonance Strategy (動能 + 波動 + 趨勢) and 3-Day Below-MA20 Exit Rule:
+      1. Momentum (MACD 柱狀體由負轉正):
+         - Uses XQ standard `WeightedClose = (High + Low + 2 * Close) / 4`.
+         - `DIF = EMA(WC, 12) - EMA(WC, 26)`, `MACD = EMA(DIF, 9)`, `OSC = DIF - MACD`.
+         - `macd_just_flipped_today`: `OSC_t > 0` and `OSC_{t-1} <= 0`.
+         - `macd_flipped_positive`: flipped today OR (when `macd_flip_lookback >= 2`, flipped yesterday
+           `OSC_{t-2} <= 0` and `OSC_t >= OSC_{t-1} > 0`).
+      2. Volatility (布林通道雙向真開口):
+         - 20-day Bollinger Bands (`bb_k = 2.0`), `Bandwidth% = (Upper - Lower) / Mid * 100`.
+         - True two-sided expansion: `BW_t > BW_{t-1}` AND `Upper_t > Upper_{t-1}` AND `Lower_t < Lower_{t-1}`.
+      3. Trend (站上上揚 20 日均線):
+         - `Close_t > MA20_t` AND `MA20_t > MA20_{t - ma_up_bars}` (default `ma_up_bars = 3`).
+      4. Exit Discipline (跌破 20 日均線連續 3 日站不回):
+         - `Close_t < MA20_t` AND `Close_{t-1} < MA20_{t-1}` AND `Close_{t-2} < MA20_{t-2}`.
+    """
+    default_out: Dict[str, Any] = {
+        "macd_dif": 0.0,
+        "macd_dea": 0.0,
+        "macd_osc": 0.0,
+        "prev_macd_osc": 0.0,
+        "macd_just_flipped_today": False,
+        "macd_flipped_positive": False,
+        "bb_upper": 0.0,
+        "bb_lower": 0.0,
+        "bb_mid": 0.0,
+        "bb_bandwidth_pct": 0.0,
+        "prev_bb_bandwidth_pct": 0.0,
+        "bb_expanding": False,
+        "ma20": 0.0,
+        "prev_ma20_ref": 0.0,
+        "ma20_rising": False,
+        "above_rising_ma20": False,
+        "three_condition_resonance": False,
+        "broken_ma20_3d": False,
+    }
+    if df is None or df.empty or "close" not in df.columns:
+        return default_out
+
+    work = df.copy()
+    closes_s = pd.to_numeric(work["close"], errors="coerce")
+    valid_mask = closes_s.notna() & (closes_s > 0)
+    if not valid_mask.any():
+        return default_out
+
+    closes = closes_s[valid_mask].to_numpy(dtype=np.float64)
+    n = len(closes)
+    if n < 5:
+        return default_out
+
+    if "high" in work.columns and "low" in work.columns:
+        highs = pd.to_numeric(work.loc[valid_mask.index[valid_mask], "high"], errors="coerce").to_numpy(dtype=np.float64)
+        lows = pd.to_numeric(work.loc[valid_mask.index[valid_mask], "low"], errors="coerce").to_numpy(dtype=np.float64)
+        highs = np.where(np.isnan(highs) | (highs <= 0), closes, highs)
+        lows = np.where(np.isnan(lows) | (lows <= 0), closes, lows)
+        wc = (highs + lows + 2.0 * closes) / 4.0
+    else:
+        wc = closes.copy()
+
+    # 1. MACD(weightedclose(), 12, 26, 9)
+    wc_series = pd.Series(wc)
+    ema_fast = wc_series.ewm(span=fast_len, adjust=False).mean().to_numpy(dtype=np.float64)
+    ema_slow = wc_series.ewm(span=slow_len, adjust=False).mean().to_numpy(dtype=np.float64)
+    dif_arr = ema_fast - ema_slow
+    dea_arr = pd.Series(dif_arr).ewm(span=sig_len, adjust=False).mean().to_numpy(dtype=np.float64)
+    osc_arr = dif_arr - dea_arr
+
+    osc_curr = float(osc_arr[-1])
+    osc_prev = float(osc_arr[-2]) if n >= 2 else osc_curr
+    just_flipped_today = bool(n >= 2 and osc_curr > 0.0 and osc_prev <= 0.0)
+    flipped_yesterday_and_holding = bool(
+        macd_flip_lookback >= 2
+        and n >= 3
+        and osc_curr >= osc_prev > 0.0
+        and float(osc_arr[-3]) <= 0.0
+    )
+    macd_flipped_positive = bool(just_flipped_today or flipped_yesterday_and_holding)
+
+    # 2. Bollinger Bands (20, 2) with true dual-sided expansion
+    close_series = pd.Series(closes)
+    win_bb = min(bb_len, n)
+    bb_mid_arr = close_series.rolling(window=win_bb, min_periods=min(5, win_bb)).mean().to_numpy(dtype=np.float64)
+    bb_std_arr = close_series.rolling(window=win_bb, min_periods=min(5, win_bb)).std(ddof=0).fillna(0.0).to_numpy(dtype=np.float64)
+    bb_up_arr = bb_mid_arr + bb_k * bb_std_arr
+    bb_dn_arr = bb_mid_arr - bb_k * bb_std_arr
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bw_arr = np.where(bb_mid_arr > 0, (bb_up_arr - bb_dn_arr) / bb_mid_arr * 100.0, 0.0)
+
+    up_curr = float(bb_up_arr[-1])
+    dn_curr = float(bb_dn_arr[-1])
+    bw_curr = float(bw_arr[-1])
+    bw_prev = float(bw_arr[-2]) if n >= 2 else bw_curr
+
+    bb_expanding = bool(
+        n >= 2
+        and bw_curr > bw_prev
+        and up_curr > float(bb_up_arr[-2])
+        and dn_curr < float(bb_dn_arr[-2])
+    )
+
+    # 3. 20-day MA trend & 3-day below-MA20 exit rule
+    win_ma = min(ma_len, n)
+    ma20_arr = close_series.rolling(window=win_ma, min_periods=min(5, win_ma)).mean().to_numpy(dtype=np.float64)
+    ma20_curr = float(ma20_arr[-1])
+    lookback_idx = max(0, n - 1 - max(1, int(ma_up_bars)))
+    ma20_ref = float(ma20_arr[lookback_idx])
+    ma20_rising = bool(n >= 2 and ma20_curr > ma20_ref)
+    above_rising_ma20 = bool(closes[-1] > ma20_curr and ma20_rising)
+
+    three_condition_resonance = bool(macd_flipped_positive and bb_expanding and above_rising_ma20)
+
+    broken_ma20_3d = bool(
+        n >= 3
+        and not np.isnan(ma20_arr[-3])
+        and closes[-1] < ma20_arr[-1]
+        and closes[-2] < ma20_arr[-2]
+        and closes[-3] < ma20_arr[-3]
+    )
+
+    return {
+        "macd_dif": round(float(dif_arr[-1]), 3),
+        "macd_dea": round(float(dea_arr[-1]), 3),
+        "macd_osc": round(osc_curr, 3),
+        "prev_macd_osc": round(osc_prev, 3),
+        "macd_just_flipped_today": just_flipped_today,
+        "macd_flipped_positive": macd_flipped_positive,
+        "bb_upper": round(up_curr, 2),
+        "bb_lower": round(dn_curr, 2),
+        "bb_mid": round(float(bb_mid_arr[-1]), 2),
+        "bb_bandwidth_pct": round(bw_curr, 2),
+        "prev_bb_bandwidth_pct": round(bw_prev, 2),
+        "bb_expanding": bb_expanding,
+        "ma20": round(ma20_curr, 2),
+        "prev_ma20_ref": round(ma20_ref, 2),
+        "ma20_rising": ma20_rising,
+        "above_rising_ma20": above_rising_ma20,
+        "three_condition_resonance": three_condition_resonance,
+        "broken_ma20_3d": broken_ma20_3d,
     }
 
 
@@ -779,6 +951,30 @@ class QuantEvaluator:
             max_stop_loss_pct=self.weights.max_single_trade_loss_pct,
         )
         stab = check_bottom_stabilization(df)
+        xq = compute_xq_three_conditions(df)
+
+        cond_parts = [
+            f"MACD柱狀體翻正({'✅' if xq['macd_flipped_positive'] else '❌'} {xq['prev_macd_osc']}➔{xq['macd_osc']})",
+            f"布林雙向開口({'✅' if xq['bb_expanding'] else '❌'} 帶寬{xq['bb_bandwidth_pct']}%)",
+            f"站上上揚20MA({'✅' if xq['above_rising_ma20'] else '❌'})",
+        ]
+        if xq["three_condition_resonance"]:
+            three_cond_status = f"⚡ 三條件共振成立：{' ＋ '.join(cond_parts)}"
+        else:
+            three_cond_status = f"未同時成立（{' ｜ '.join(cond_parts)}）"
+
+        exit_desc = ""
+        if xq["broken_ma20_3d"]:
+            if is_etf:
+                exit_desc = (
+                    f"⚠️ 短線已連續 3 日收盤低於 20 日均線 ({ma20} {currency})，"
+                    "ETF 屬長線配置標的，宜觀察年線支撐與止跌訊號分批布局"
+                )
+            else:
+                exit_desc = (
+                    f"🚨 觸發破線三日出場：個股已連續 3 個交易日收盤跌破 20 日均線 ({ma20} {currency}) 站不回，"
+                    "依策略出場紀律建議果斷減碼或出場"
+                )
 
         result = QuantEvaluationResult(
             symbol=clean_symbol,
@@ -801,6 +997,23 @@ class QuantEvaluator:
             ma5_stabilized=stab["ma5_stabilized"],
             no_new_low_3d=stab["no_new_low_3d"],
             bottom_stabilized=stab["bottom_stabilized"],
+            macd_dif=xq["macd_dif"],
+            macd_dea=xq["macd_dea"],
+            macd_osc=xq["macd_osc"],
+            prev_macd_osc=xq["prev_macd_osc"],
+            macd_just_flipped_today=xq["macd_just_flipped_today"],
+            macd_flipped_positive=xq["macd_flipped_positive"],
+            bb_upper=xq["bb_upper"],
+            bb_lower=xq["bb_lower"],
+            bb_bandwidth_pct=xq["bb_bandwidth_pct"],
+            prev_bb_bandwidth_pct=xq["prev_bb_bandwidth_pct"],
+            bb_expanding=xq["bb_expanding"],
+            ma20_rising=xq["ma20_rising"],
+            above_rising_ma20=xq["above_rising_ma20"],
+            three_condition_resonance=xq["three_condition_resonance"],
+            three_condition_status=three_cond_status,
+            broken_ma20_3d=xq["broken_ma20_3d"],
+            exit_signal_desc=exit_desc,
             position_sizing_advice=self.weights.default_staged_entry_plan,
         )
 
@@ -836,8 +1049,18 @@ class QuantEvaluator:
             ma240=ma240,
             dynamic_stop_loss=result.dynamic_stop_loss,
         )
+        if result.three_condition_resonance:
+            result.technical_score = min(100.0, round(result.technical_score + 20.0, 1))
+        elif result.macd_flipped_positive and result.above_rising_ma20:
+            result.technical_score = min(100.0, round(result.technical_score + 10.0, 1))
+
         if not result.bottom_stabilized and current_price < ma20:
             result.technical_score = max(0.0, round(result.technical_score - 10.0, 1))
+
+        if result.broken_ma20_3d and not result.is_etf:
+            result.technical_score = min(result.technical_score, 20.0)
+            if result.exit_signal_desc and result.exit_signal_desc not in result.risk_notes:
+                result.risk_notes.insert(0, result.exit_signal_desc)
 
         # Compute chip & macro score (0-100, 20% weight)
         result.chip_macro_score = self._score_chip_and_macro(
@@ -856,6 +1079,9 @@ class QuantEvaluator:
             weights=self.weights,
             etf_premium_risk_flag=result.etf_premium_risk_flag,
         )
+        if result.broken_ma20_3d and not result.is_etf:
+            advice = "賣出"
+            base_score = min(base_score, 45)
         result.base_confidence_score = base_score
         result.quant_action_advice = advice
         return result
@@ -889,6 +1115,7 @@ class QuantEvaluator:
         currency = result.currency
         explanations = [
             f"📌 **均線 (MA5/MA20/MA60)**：代表過去 5日（週線 {result.ma5}）、20日（月線 {result.ma20}）、60日（季線 {result.ma60}）市場投資人的平均買進成本。股價站上均線代表多數人處於獲利狀態、下檔買盤有支撐。",
+            f"⚡ **三條件共振檢核（動能＋波動＋趨勢）**：{result.three_condition_status}；出場紀律為「跌破 20 日均線連續 3 日站不回」（目前：{'🚨 已觸發破線三日出場' if result.broken_ma20_3d else '✅ 未跌破或未達三日'}）。",
             f"🛡️ **止跌確認機制（不接掉落的刀子）**：第二買點（價值支撐 {result.buy_point_2} {currency}）除了看估值便宜外，系統強制檢查「5日均線走平或翻揚」加上「近3日收盤未再破底」（目前狀態：{result.buy_point_2_status}），避免在急跌趨勢中過早接刀。",
             f"🛑 **ATR 波動度與 8% 硬性停損上限**：14日 ATR ({result.atr_14} {currency}) 是該標的每天平均上下震盪幅度。移動停損價取「20日高點減 2.5 倍 ATR ({result.atr_stop_loss} {currency})」與「買入參考價往下 8% ({result.hard_cap_stop_loss} {currency})」兩者較高值（即 **{result.dynamic_stop_loss} {currency}**），確保單筆最大虧損不超過 8%。",
             f"💰 **保守分批進場資金建議**：{result.position_sizing_advice}",
@@ -1142,6 +1369,8 @@ def format_quant_evaluation_prompt_block(eval_data: Optional[Dict[str, Any]]) ->
         f"| 🎯 **第一買點（順勢拉回）** | **{eval_data.get('buy_point_1', 'N/A')} {currency}** | 結合 MA20 ({eval_data.get('ma20', 'N/A')}) 與合理估值/年線乖離定錨（建議首波試單 30% 資金） |",
         f"| 🔵 **第二買點（價值支撐）** | **{eval_data.get('buy_point_2', 'N/A')} {currency}** | 結合 MA60 ({eval_data.get('ma60', 'N/A')}) 與低位估值定錨 ｜ {eval_data.get('buy_point_2_status', '')} |",
         f"| 🛑 **動態移動停損價** | **{eval_data.get('dynamic_stop_loss', 'N/A')} {currency}** | 取「20日高點-2.5×ATR ({eval_data.get('atr_stop_loss', 'N/A')})」與「買入參考價往下 8% ({eval_data.get('hard_cap_stop_loss', 'N/A')})」較高者（最大單筆風險 ≤ 8%） |",
+        f"| 🚨 **破20日線三日出場檢核** | **{'🚨 觸發出場' if eval_data.get('broken_ma20_3d') else '✅ 正常'}** | {eval_data.get('exit_signal_desc') or '未連續 3 日收盤跌破 20 日均線'} |",
+        f"| ⚡ **三條件共振檢核 (動能/波動/趨勢)** | **{'✅ 成立' if eval_data.get('three_condition_resonance') else '未同時成立'}** | {eval_data.get('three_condition_status', 'N/A')} |",
         f"| 🎊 **波段停利參考價** | **{eval_data.get('swing_take_profit', 'N/A')} {currency}** | 依風險報酬比與波段 ATR 擴展目標計算 |",
         f"| 💰 **分批進場資金比例建議** | **30% / 40% / 30%** | {eval_data.get('position_sizing_advice', DEFAULT_QUANT_WEIGHTS.default_staged_entry_plan)} |",
         "",

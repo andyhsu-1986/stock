@@ -856,9 +856,11 @@ class TWMarketScreener:
         df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
         latest_market_date = str(df["date"].max())
 
+        from engine.quant_evaluator import compute_xq_three_conditions
+
         records: List[Dict[str, Any]] = []
         for symbol, grp in df.groupby("symbol", sort=False):
-            tail = grp.tail(25)
+            tail = grp.tail(120)
             last_row = tail.iloc[-1]
             # Must be active on the latest market date
             if str(last_row["date"]) != latest_market_date:
@@ -911,12 +913,14 @@ class TWMarketScreener:
             if vol_ma5 < self.min_avg_volume_5d_shares or latest_turnover < 10_000_000:
                 continue
 
-            # Moving Average & Trend metrics
+            # Moving Average, Trend & XQ Three-Condition Resonance metrics
+            xq = compute_xq_three_conditions(tail, ma_up_bars=3, macd_flip_lookback=2)
             is_bullish_aligned = bool(close > ma20 and ma5 > ma10 and ma10 > ma20)
-            ma20_rising = bool(ma20 >= prev_ma20)
+            ma20_rising = bool(xq["ma20_rising"] or ma20 >= prev_ma20)
             bias_20 = ((close - ma20) / ma20 * 100.0) if ma20 > 0 else 0.0
             base_20_close = float(closes[-min(20, n_bars)])
             ret_20 = ((close / base_20_close - 1.0) * 100.0) if base_20_close > 0 else 0.0
+            three_cond_match = bool(xq["three_condition_resonance"] and bias_20 <= 12.0)
 
             # Exclude stocks below MA20 or over-extended (> 18% above MA20)
             if close <= ma20 or bias_20 > 18.0:
@@ -926,13 +930,17 @@ class TWMarketScreener:
             trend_score = 0.0
             if is_bullish_aligned:
                 trend_score += 15.0
-            elif close > ma5 and ma5 > ma20:
-                trend_score += 9.0
+            elif three_cond_match or (close > ma5 and ma5 > ma20):
+                trend_score += 12.0
             else:
                 trend_score += 4.0
 
             if ma20_rising:
                 trend_score += 5.0
+            if xq["macd_flipped_positive"]:
+                trend_score += 3.0
+            if xq["bb_expanding"]:
+                trend_score += 2.0
             if 0.0 < ret_20 <= 25.0:
                 trend_score += min(5.0, (ret_20 / 15.0) * 5.0)
             elif ret_20 > 25.0:
@@ -943,6 +951,7 @@ class TWMarketScreener:
                 trend_score += 2.5
             else:
                 trend_score += 1.0
+            trend_score = min(30.0, trend_score)
 
             # 2. Volume Score (0 - 20)
             vol_ratio_20 = (latest_vol / vol_ma20) if vol_ma20 > 0 else 1.0
@@ -1012,11 +1021,21 @@ class TWMarketScreener:
                 elif 3.5 < pb <= 6.0:
                     fundamental_score += 2.0
 
-            total_score = round(trend_score + volume_score + inst_score + fundamental_score, 2)
+            resonance_bonus = 15.0 if three_cond_match else 0.0
+            total_score = round(
+                min(100.0, trend_score + volume_score + inst_score + fundamental_score + resonance_bonus),
+                2,
+            )
             strict_pass = bool(
-                is_bullish_aligned
-                and (inst_consec >= 1 or inst_5d_net > 0)
-                and (is_etf or pe > 0 or dy >= 2.0)
+                (
+                    three_cond_match
+                    and (is_etf or pe > 0 or dy >= 2.0 or inst_5d_net >= 0)
+                )
+                or (
+                    is_bullish_aligned
+                    and (inst_consec >= 1 or inst_5d_net > 0)
+                    and (is_etf or pe > 0 or dy >= 2.0)
+                )
             )
 
             records.append(
@@ -1039,6 +1058,9 @@ class TWMarketScreener:
                     "pe_ratio": pe,
                     "dividend_yield": dy,
                     "pb_ratio": pb,
+                    "three_cond_match": three_cond_match,
+                    "macd_osc": xq["macd_osc"],
+                    "bb_bandwidth_pct": xq["bb_bandwidth_pct"],
                     "strict_pass": strict_pass,
                     "trend_score": round(trend_score, 2),
                     "volume_score": round(volume_score, 2),
@@ -1053,17 +1075,17 @@ class TWMarketScreener:
 
         scored_df = pd.DataFrame(records)
         strict_df = scored_df[scored_df["strict_pass"]].sort_values(
-            ["total_score", "inst_consec_days", "vol_ratio_20"],
-            ascending=[False, False, False],
+            ["three_cond_match", "total_score", "bb_bandwidth_pct", "inst_consec_days", "vol_ratio_20"],
+            ascending=[False, False, False, False, False],
         )
 
         if len(strict_df) >= self.top_n:
             return strict_df.head(self.top_n).reset_index(drop=True)
 
-        # Fallback: fill remaining slots with non-strict liquid uptrend candidates ranked by total_score
+        # Fallback: fill remaining slots with non-strict liquid uptrend candidates ranked by resonance & total_score
         rest_df = scored_df[~scored_df["strict_pass"]].sort_values(
-            ["total_score", "inst_consec_days", "vol_ratio_20"],
-            ascending=[False, False, False],
+            ["three_cond_match", "total_score", "bb_bandwidth_pct", "inst_consec_days", "vol_ratio_20"],
+            ascending=[False, False, False, False, False],
         )
         combined = pd.concat([strict_df, rest_df], ignore_index=True)
         return combined.head(self.top_n).reset_index(drop=True)
