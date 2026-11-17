@@ -110,7 +110,9 @@ jobs:
           ALERT_COOLDOWN_TRADING_DAYS: '5'
           ALERT_PRICE_MOVE_THRESHOLD_PCT: '3.0'
           ALERT_SUPPRESS_MARKET_REVIEW_PUSH: 'true'
-          MAX_WORKERS: ${{ vars.MAX_WORKERS || '2' }}
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || '5' }}
+          GEMINI_REQUEST_DELAY: ${{ vars.GEMINI_REQUEST_DELAY || '0.5' }}
+          GEMINI_MAX_RETRIES: ${{ vars.GEMINI_MAX_RETRIES || '2' }}
           LOG_LEVEL: 'INFO'
         run: |
           if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
