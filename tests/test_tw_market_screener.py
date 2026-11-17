@@ -413,6 +413,42 @@ class TWMarketScreenerTestCase(unittest.TestCase):
             self.assertEqual(fallback_codes, base_codes)
             self.assertEqual(fallback_targets, base_targets)
 
+    def test_twse_tpex_per_market_latest_date_alignment(self):
+        """
+        Verify score_universe() evaluates TWSE and TPEx using each exchange's own latest date
+        so TWSE stocks are never silently dropped when TPEx publishes earlier on a trading day.
+        """
+        from screener.tw_market_screener import TWMarketScreener
+
+        rows = []
+        # 25 bars for TWSE ending 2026-11-16, and 26 bars for TPEx ending 2026-11-17
+        for i in range(25):
+            dt = f"2026-10-{i+1:02d}" if i < 20 else f"2026-11-{i-19:02d}"
+            rows.append({
+                "date": dt, "code": "2330", "symbol": "2330.TW", "name": "台積電",
+                "market": "TWSE", "is_etf": False, "open": 100.0 + i * 0.5,
+                "high": 101.0 + i * 0.5, "low": 99.5 + i * 0.5, "close": 100.5 + i * 0.5,
+                "volume": 5_000_000, "turnover_value": 500_000_000,
+                "foreign_net": 1_000_000, "trust_net": 200_000, "dealer_net": 50_000,
+                "inst_total_net": 1_250_000, "pe_ratio": 18.0, "dividend_yield": 2.5, "pb_ratio": 3.0,
+            })
+        for i in range(26):
+            dt = f"2026-10-{i+1:02d}" if i < 20 else f"2026-11-{i-19:02d}"
+            rows.append({
+                "date": dt, "code": "6488", "symbol": "6488.TWO", "name": "環球晶",
+                "market": "TPEX", "is_etf": False, "open": 80.0 + i * 0.4,
+                "high": 81.0 + i * 0.4, "low": 79.5 + i * 0.4, "close": 80.5 + i * 0.4,
+                "volume": 3_000_000, "turnover_value": 240_000_000,
+                "foreign_net": 500_000, "trust_net": 100_000, "dealer_net": 20_000,
+                "inst_total_net": 620_000, "pe_ratio": 16.0, "dividend_yield": 3.0, "pb_ratio": 2.5,
+            })
+
+        screener = TWMarketScreener(top_n=10)
+        ranked = screener.score_universe(pd.DataFrame(rows))
+        symbols = set(ranked["symbol"].tolist())
+        self.assertIn("2330.TW", symbols)
+        self.assertIn("6488.TWO", symbols)
+
 
 if __name__ == "__main__":
     unittest.main()

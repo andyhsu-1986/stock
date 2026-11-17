@@ -53,10 +53,11 @@ env/
 *~
 .cursorrules
 
-# 資料與日誌（允許 GitHub Actions 提交台股/財報 Parquet 快取、防洗版警報狀態與每日/週報）
+# 資料與日誌（允許 GitHub Actions 提交台股/財報 Parquet 快取、持倉設定、防洗版警報狀態與每日/週報）
 /data/*
 !/data/*.parquet
 !/data/alert_state.json
+!/data/portfolio.json
 /.llm_usage_hmac_secret
 **/.llm_usage_hmac_secret
 logs/

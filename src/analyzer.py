@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple, Callable, Union
@@ -2620,6 +2621,9 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
         self._default_skill_policy_override = default_skill_policy
         self._use_legacy_default_prompt_override = use_legacy_default_prompt
         self._resolved_prompt_state: Optional[Dict[str, Any]] = None
+        self._model_fail_lock = threading.Lock()
+        self._model_503_counts: Dict[str, int] = {}
+        self._tripped_models: set[str] = set()
         self._router = None
         self._legacy_router_model_list: List[Dict[str, Any]] = []
         self._litellm_available = False
@@ -2842,7 +2846,7 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                 self._router = Router(
                     model_list=router_model_list,
                     routing_strategy="simple-shuffle",
-                    num_retries=2,
+                    num_retries=1,
                 )
             except TypeError:
                 logger.debug("Analyzer LLM: Router constructor signature not compatible; fallback to direct mode")
@@ -2887,7 +2891,7 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                 self._router = Router(
                     model_list=legacy_model_list,
                     routing_strategy="simple-shuffle",
-                    num_retries=2,
+                    num_retries=1,
                 )
             except TypeError:
                 logger.debug("Analyzer LLM: Legacy Router constructor signature not compatible; using legacy model_list fallback")
@@ -3682,6 +3686,14 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
         models_to_try = [m for m in models_to_try if m]
 
+        # Move tripped 503/high-demand models behind healthy fallbacks for fast failover
+        tripped_snapshot = set(getattr(self, "_tripped_models", set()) or set())
+        if tripped_snapshot and len(models_to_try) > 1:
+            healthy = [m for m in models_to_try if m not in tripped_snapshot]
+            tripped = [m for m in models_to_try if m in tripped_snapshot]
+            if healthy:
+                models_to_try = healthy + tripped
+
         use_channel_router = self._has_channel_config(config)
 
         last_error = None
@@ -3910,6 +3922,21 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                         last_provider = router_provider
                 safe_error = self._sanitize_litellm_exception_text(e, config=config, model=model)
                 logger.warning("[LiteLLM] %s failed: %s", model, safe_error)
+                err_lower = safe_error.lower()
+                if any(tok in err_lower for tok in ("503", "serviceunavailable", "high demand", "overloaded", "timeout", "timed out")):
+                    fail_lock = getattr(self, "_model_fail_lock", None)
+                    counts = getattr(self, "_model_503_counts", None)
+                    tripped = getattr(self, "_tripped_models", None)
+                    if fail_lock is not None and counts is not None and tripped is not None:
+                        with fail_lock:
+                            counts[model] = counts.get(model, 0) + 1
+                            if counts[model] >= 2 and model not in tripped:
+                                tripped.add(model)
+                                logger.warning(
+                                    "[LiteLLM CircuitBreaker] 模型 %s 連續 %d 次遭遇 503/超時，本輪優先改用備援模型",
+                                    model,
+                                    counts[model],
+                                )
                 last_error = RuntimeError(f"{type(e).__name__}: {safe_error}")
                 continue
 
@@ -4167,6 +4194,51 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
             )
             self._apply_quant_evaluation_enrichment(fallback_res, context.get("quant_evaluation"))
             return fallback_res
+
+    def analyze_quant_fast(
+        self,
+        context: Dict[str, Any],
+        *,
+        report_language: str = "zh",
+    ) -> AnalysisResult:
+        """
+        Build a complete quantitative-only AnalysisResult (0 LLM cost, <1ms) for
+        lower-priority screened stocks outside portfolio / watchlist / three-condition / top-N.
+        """
+        code = str(context.get("code") or "Unknown")
+        name = str(context.get("stock_name") or STOCK_NAME_MAP.get(code) or f"股票{code}")
+        qe = context.get("quant_evaluation") if isinstance(context.get("quant_evaluation"), dict) else {}
+        base_score = int(qe.get("base_confidence_score") or 50)
+        advice = str(qe.get("quant_action_advice") or "持有")
+        trend_pred = "看多" if advice == "買入" or base_score >= 65 else ("偏弱" if advice == "賣出" else "震盪")
+        three_cond = bool(qe.get("three_condition_resonance", False))
+        summary = (
+            f"{name}({code}) 由雙軌量化與財報引擎完成快速體檢（"
+            f"信心分數 {base_score} 分，建議【{advice}】"
+            + ("，⚡三條件共振成立" if three_cond else "")
+            + "；AI 長文解析依分層規則優先保留給持股、觀察名單、共振股與前段標的）。"
+        )
+        res = AnalysisResult(
+            code=code,
+            name=name,
+            sentiment_score=base_score,
+            trend_prediction=localize_trend_prediction(trend_pred, report_language),
+            operation_advice=localize_operation_advice(advice, report_language),
+            confidence_level=localize_confidence_level("高" if base_score >= 75 else "中", report_language),
+            buy_reason="依多年財報 CAGR、毛利率斜率、法人籌碼與 XQ 技術結構完成客觀量化計分。",
+            analysis_summary=summary,
+            risk_warning="；".join(str(x) for x in (qe.get("risk_notes") or [])),
+            success=True,
+            model_used="quant-engine-v2",
+            report_language=report_language,
+        )
+        realtime = context.get("realtime") if isinstance(context.get("realtime"), dict) else {}
+        if realtime:
+            res.current_price = realtime.get("price")
+            res.change_pct = realtime.get("change_pct")
+        res.market_snapshot = self._build_market_snapshot(context)
+        self._apply_quant_evaluation_enrichment(res, qe)
+        return res
         
         try:
             # 格式化输入（包含技术面数据和新闻）
@@ -4218,11 +4290,11 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
             if backend_id not in LOCAL_CLI_GENERATION_BACKEND_IDS:
                 logger.debug(f"=== 完整 Prompt ({len(prompt)}字符) ===\n{prompt}\n=== End Prompt ===")
 
-            # 设置生成配置（設定單次呼叫 timeout 45s 避免雲端排程因單一請求 503 卡死超時）
+            # 设置生成配置（設定單次呼叫 timeout 30s 與單次不內部重試，避免 503 時卡住整個排程）
             generation_config = {
                 "temperature": config.llm_temperature,
                 "max_output_tokens": 8192,
-                "timeout": 45,
+                "timeout": 30,
             }
 
             logger.info(f"[LLM调用] 开始调用 {model_name}...")

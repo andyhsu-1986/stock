@@ -695,6 +695,7 @@ def _merge_with_tw_screener_targets(
     args: argparse.Namespace,
     base_codes: List[str],
     analysis_targets: Optional[List[AnalysisTarget]] = None,
+    screener_meta_out: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[List[str], Optional[List[AnalysisTarget]]]:
     """Merge fixed watchlist codes with Top N Taiwan market screened stocks (fail-open)."""
     market_scope = str(getattr(args, "market", "all") or "all").strip().lower()
@@ -707,6 +708,7 @@ def _merge_with_tw_screener_targets(
 
     try:
         from screener.tw_market_screener import (
+            TWMarketScreener,
             get_top_tw_screened_stocks,
             merge_watchlist_with_screened,
         )
@@ -717,10 +719,20 @@ def _merge_with_tw_screener_targets(
             "[TWMarketScreener] 啟動台股全市場盤後量化初篩 (Top %d)...",
             top_n,
         )
-        screened_codes = get_top_tw_screened_stocks(
-            top_n=top_n,
-            bootstrap_days=bootstrap_days,
-        )
+        if screener_meta_out is not None:
+            screener = TWMarketScreener(top_n=top_n, bootstrap_days=bootstrap_days)
+            screened_codes, ranked_df = screener.run_screening(update_history=True)
+            if ranked_df is not None and not ranked_df.empty:
+                for rank_idx, row in enumerate(ranked_df.to_dict(orient="records"), start=1):
+                    sym_key = str(row.get("symbol") or "").strip().upper()
+                    if sym_key:
+                        row["rank"] = rank_idx
+                        screener_meta_out[sym_key] = row
+        else:
+            screened_codes = get_top_tw_screened_stocks(
+                top_n=top_n,
+                bootstrap_days=bootstrap_days,
+            )
         if not screened_codes:
             logger.warning("[TWMarketScreener] 未篩選出額外台股標的，維持原固定觀察名單: %s", base_codes)
             return base_codes, analysis_targets
@@ -1140,13 +1152,42 @@ def run_full_analysis(
             (stock_codes is None or (os.getenv("GITHUB_ACTIONS") == "true" and not getattr(args, "stocks", None)))
             and portfolio_stock_codes is None
         )
-        effective_codes = stock_codes if stock_codes is not None else config.stock_list
+        screener_meta: Dict[str, Dict[str, Any]] = {}
+        portfolio_mgr = None
+        combined_watchlist_codes: List[str] = list(config.stock_list or [])
+        try:
+            from utils.portfolio import PortfolioManager
+            from screener.tw_market_screener import merge_watchlist_with_screened
+
+            portfolio_mgr = PortfolioManager()
+            held_codes = portfolio_mgr.get_held_symbols()
+            pm_watch = portfolio_mgr.get_watchlist_symbols()
+            combined_watchlist_codes = merge_watchlist_with_screened(combined_watchlist_codes, pm_watch)
+            if using_config_stock_list:
+                base_with_portfolio = merge_watchlist_with_screened(
+                    list(effective_codes or []),
+                    held_codes + pm_watch,
+                )
+                if analysis_targets is not None and len(base_with_portfolio) > len(list(effective_codes or [])):
+                    existing_t = {
+                        (canonical_stock_code(c) or c.upper()): t
+                        for c, t in zip(list(effective_codes or []), analysis_targets)
+                    }
+                    analysis_targets = [existing_t.get(c) or parse_analysis_target(c) for c in base_with_portfolio]
+                effective_codes = base_with_portfolio
+        except Exception as exc:
+            logger.debug("[Portfolio] 載入持倉清單略過: %s", exc)
+
+        effective_codes = stock_codes if stock_codes is not None else (
+            effective_codes if using_config_stock_list else config.stock_list
+        )
         if using_config_stock_list:
             effective_codes, analysis_targets = _merge_with_tw_screener_targets(
                 config,
                 args,
                 list(effective_codes or []),
                 analysis_targets=analysis_targets,
+                screener_meta_out=screener_meta,
             )
 
         market_scope = str(getattr(args, "market", "all") or "all").strip().lower()
@@ -1275,6 +1316,9 @@ def run_full_analysis(
             daily_market_context_enabled=should_use_daily_market_context,
             daily_market_context_allow_generate=should_use_daily_market_context,
             market_scope=market_scope,
+            screener_meta=screener_meta,
+            watchlist_codes=combined_watchlist_codes,
+            portfolio_manager=portfolio_mgr,
         )
         if should_use_daily_market_context:
             # Prompt-side context can reuse historical summaries, while full-merge

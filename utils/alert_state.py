@@ -89,10 +89,13 @@ class AlertDecision:
     reasons: List[str] = field(default_factory=list)
     risk_notes: List[str] = field(default_factory=list)
 
-    trigger_type: Optional[str] = None   # "high_confidence_buy" | "stop_loss" | "take_profit" | "broken_ma20_exit" | None
-    state_label: str = "持有"            # "買入" | "觸及停損" | "觸及停利" | "破月線三日出場" | "持有" | "賣出"
+    trigger_type: Optional[str] = None   # "high_confidence_buy" | "three_condition_buy" | "buy_zone_touched" | "portfolio_stop_loss" | "portfolio_take_profit" | "stop_loss" | "take_profit" | "broken_ma20_exit" | None
+    state_label: str = "持有"
     three_condition_resonance: bool = False
     broken_ma20_3d: bool = False
+    is_held: bool = False
+    buy_price: float = 0.0
+    unrealized_pnl_pct: Optional[float] = None
     should_push: bool = False
     skip_reason_code: str = ""           # "" | "below_threshold" | "antispam_cooldown" | "daily_buy_cap"
     skip_reason_desc: str = ""
@@ -163,25 +166,60 @@ def _extract_plain_reasons(
     dynamic_stop_loss: float,
     swing_take_profit: float,
     currency: str,
+    held_metrics: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Extract at most 3 beginner-friendly Traditional Chinese bullet points explaining why to act."""
     bullets: List[str] = []
 
-    if trigger_type == "stop_loss":
-        bullets.append(
-            f"現價 **{current_price} {currency}** 已觸及或跌破嚴格停損線 **{dynamic_stop_loss} {currency}**，"
-            "優先執行停損紀律以防止單筆虧損擴大。"
-        )
-    elif trigger_type == "take_profit":
-        bullets.append(
-            f"現價 **{current_price} {currency}** 已達成波段停利目標 **{swing_take_profit} {currency}**，"
-            "建議分批獲利入袋或將移動停損點上調保護既得獲利。"
-        )
+    if trigger_type in ("stop_loss", "portfolio_stop_loss"):
+        if held_metrics:
+            pnl = held_metrics.get("unrealized_pnl_pct")
+            pnl_txt = f"（帳面損益 {pnl:+.2f}%）" if isinstance(pnl, (int, float)) else ""
+            if held_metrics.get("broken_ma20_exit"):
+                bullets.append(
+                    f"持股現價 **{current_price} {currency}** 已連續 3 日收盤跌破 20 日均線{pnl_txt}，趨勢轉弱建議果斷減碼脫手。"
+                )
+            elif held_metrics.get("near_stop_loss"):
+                bullets.append(
+                    f"持股現價 **{current_price} {currency}** 距離您的停損保護線 **{dynamic_stop_loss} {currency}** 僅剩 **{held_metrics.get('dist_to_stop_pct')}%**{pnl_txt}，請提前做好風險脫手準備。"
+                )
+            else:
+                bullets.append(
+                    f"持股現價 **{current_price} {currency}** 已觸及停損線 **{dynamic_stop_loss} {currency}**{pnl_txt}，依紀律立即執行停損避免虧損擴大。"
+                )
+        else:
+            bullets.append(
+                f"現價 **{current_price} {currency}** 已觸及或跌破嚴格停損線 **{dynamic_stop_loss} {currency}**，"
+                "優先執行停損紀律以防止單筆虧損擴大。"
+            )
+    elif trigger_type in ("take_profit", "portfolio_take_profit"):
+        if held_metrics:
+            pnl = held_metrics.get("unrealized_pnl_pct")
+            pnl_txt = f"（目前帳面獲利 **{pnl:+.2f}%**）" if isinstance(pnl, (int, float)) else ""
+            if held_metrics.get("near_take_profit") and not held_metrics.get("hit_take_profit"):
+                bullets.append(
+                    f"持股現價 **{current_price} {currency}** 已逼近停利上限 **{swing_take_profit} {currency}**（差距僅 {held_metrics.get('dist_to_tp_pct')}%）{pnl_txt}，可開始分批獲利入袋。"
+                )
+            else:
+                bullets.append(
+                    f"持股現價 **{current_price} {currency}** 已達成停利目標 **{swing_take_profit} {currency}**{pnl_txt}，建議分批賣出落袋為安或上移移動停利。"
+                )
+        else:
+            bullets.append(
+                f"現價 **{current_price} {currency}** 已達成波段停利目標 **{swing_take_profit} {currency}**，"
+                "建議分批獲利入袋或將移動停損點上調保護既得獲利。"
+            )
     elif trigger_type == "broken_ma20_exit":
         ma20_val = quant_eval.get("ma20") or 0.0
         bullets.append(
             f"股價（現價 **{current_price} {currency}**）已**連續 3 個交易日收盤跌破 20 日均線（{ma20_val} {currency}）站不回**，"
             "依策略出場紀律建議果斷減碼或出場。"
+        )
+    elif trigger_type == "buy_zone_touched":
+        bp1 = quant_eval.get("buy_point_1") or 0.0
+        bp2 = quant_eval.get("buy_point_2") or 0.0
+        bullets.append(
+            f"現價 **{current_price} {currency}** 已跌入建議買點區間（第一買點 {bp1} / 第二買點 {bp2} {currency}），且基本面體質通過檢核，可依 30%/40%/30% 分批計畫承接。"
         )
 
     if quant_eval.get("three_condition_resonance"):
@@ -302,8 +340,16 @@ class AlertStateManager:
         rec = alerts.get(clean)
         return dict(rec) if isinstance(rec, dict) else None
 
-    def _build_decision(self, result: Any, reference_date: date) -> AlertDecision:
+    def _build_decision(
+        self,
+        result: Any,
+        reference_date: date,
+        *,
+        portfolio_positions: Optional[Dict[str, Any]] = None,
+        watchlist_set: Optional[set[str]] = None,
+    ) -> AlertDecision:
         symbol = str(getattr(result, "code", "") or "").strip().upper()
+        bare_symbol = symbol.split(".")[0]
         name = str(getattr(result, "name", "") or symbol).strip()
         market = _infer_market(symbol)
         dash = getattr(result, "dashboard", None)
@@ -338,27 +384,116 @@ class AlertStateManager:
         position_sizing = str(quant_eval.get("position_sizing_advice") or self.config.default_position_advice)
         risk_notes = [str(x) for x in (quant_eval.get("risk_notes") or []) if str(x).strip()]
 
-        # Determine high-threshold trigger eligibility:
-        # 1. Price hit Stop-Loss (<= dynamic_stop_loss) or Take-Profit (>= swing_take_profit)
-        # 2. Broken below 20MA for 3 consecutive trading days (broken_ma20_3d)
-        # 3. Advice == "買入" AND score >= 82
         three_cond_res = bool(quant_eval.get("three_condition_resonance", False))
         is_etf_asset = bool(quant_eval.get("is_etf", False))
         broken_ma20_3d = bool(quant_eval.get("broken_ma20_3d", False) and not is_etf_asset)
+        bottom_stabilized = bool(quant_eval.get("bottom_stabilized", False))
+        prem_risk_flag = bool(quant_eval.get("etf_premium_risk_flag", False))
+        fundamental_score = float(quant_eval.get("fundamental_score") or 50.0)
+        eps_ttm = quant_eval.get("eps_ttm")
+        positive_eps_ok = is_etf_asset or (eps_ttm is None) or (float(eps_ttm) > 0)
+
+        held_pos = None
+        if portfolio_positions is not None:
+            held_pos = portfolio_positions.get(symbol) or portfolio_positions.get(bare_symbol)
+
+        held_metrics: Optional[Dict[str, Any]] = None
         trigger_type: Optional[str] = None
         state_label = advice
-        if current_price > 0 and dynamic_stop_loss > 0 and current_price <= dynamic_stop_loss:
-            trigger_type = "stop_loss"
-            state_label = "觸及停損"
-        elif current_price > 0 and swing_take_profit > 0 and current_price >= swing_take_profit:
-            trigger_type = "take_profit"
-            state_label = "觸及停利"
-        elif broken_ma20_3d:
-            trigger_type = "broken_ma20_exit"
-            state_label = "破月線三日出場"
-        elif advice == "買入" and score >= self.config.min_buy_score:
-            trigger_type = "high_confidence_buy"
-            state_label = "買入"
+        custom_skip_desc: Optional[str] = None
+
+        if portfolio_positions is not None:
+            # --- Portfolio-Aware Mode (Held = Exit/TP/SL alerts ONLY; Unheld = Buy opportunities ONLY) ---
+            if held_pos is not None:
+                from utils.portfolio import compute_position_risk_metrics
+
+                held_metrics = compute_position_risk_metrics(
+                    held_pos,
+                    current_price=current_price,
+                    dynamic_stop_loss=dynamic_stop_loss,
+                    swing_take_profit=swing_take_profit,
+                    broken_ma20_3d=bool(quant_eval.get("broken_ma20_3d", False)),
+                    is_etf=is_etf_asset,
+                )
+                dynamic_stop_loss = float(held_metrics.get("effective_stop_loss") or dynamic_stop_loss)
+                swing_take_profit = float(held_metrics.get("effective_take_profit") or swing_take_profit)
+
+                if held_metrics["hit_stop_loss"] or held_metrics["broken_ma20_exit"]:
+                    trigger_type = "portfolio_stop_loss"
+                    state_label = "持股觸及停損／破線逃命"
+                elif held_metrics["near_stop_loss"]:
+                    trigger_type = "portfolio_stop_loss"
+                    state_label = "持股接近停損預警"
+                elif held_metrics["hit_take_profit"]:
+                    trigger_type = "portfolio_take_profit"
+                    state_label = "持股達標停利賣出"
+                elif held_metrics["near_take_profit"]:
+                    trigger_type = "portfolio_take_profit"
+                    state_label = "持股接近停利上限"
+                else:
+                    pnl_pct = held_metrics.get("unrealized_pnl_pct")
+                    pnl_txt = f"{pnl_pct:+.2f}%" if isinstance(pnl_pct, (int, float)) else "N/A"
+                    custom_skip_desc = (
+                        f"目前持倉（均價 {held_pos.buy_price}，損益 {pnl_txt}）仍於安全區間，"
+                        f"尚未接近停利上限 ({swing_take_profit}) 或停損線 ({dynamic_stop_loss})"
+                    )
+            else:
+                # Unheld stock: NEVER push stop-loss / take-profit / broken-MA20 exit noise!
+                in_watchlist = bool(
+                    watchlist_set and (symbol in watchlist_set or bare_symbol in watchlist_set)
+                )
+                bp1_touched = bool(
+                    current_price > 0
+                    and buy_point_1 > 0
+                    and (buy_point_2 <= 0 or current_price > buy_point_2)
+                    and current_price <= buy_point_1 * 1.01
+                    and current_price >= max(dynamic_stop_loss * 1.005, buy_point_1 * 0.94)
+                )
+                bp2_touched = bool(
+                    current_price > 0
+                    and buy_point_2 > 0
+                    and (buy_point_2 * 0.96 <= current_price <= buy_point_2 * 1.02)
+                    and bottom_stabilized
+                )
+
+                if (
+                    three_cond_res
+                    and not prem_risk_flag
+                    and fundamental_score >= 55.0
+                    and positive_eps_ok
+                    and score >= 65
+                ):
+                    trigger_type = "three_condition_buy"
+                    state_label = "三條件共振黃金起漲"
+                elif advice == "買入" and score >= self.config.min_buy_score:
+                    trigger_type = "high_confidence_buy"
+                    state_label = "高信心買入精選"
+                elif (
+                    (bp1_touched or bp2_touched)
+                    and (in_watchlist or fundamental_score >= 65.0)
+                    and not prem_risk_flag
+                    and not broken_ma20_3d
+                ):
+                    trigger_type = "buy_zone_touched"
+                    state_label = "跌入建議買點到價"
+                elif three_cond_res and (fundamental_score < 55.0 or not positive_eps_ok):
+                    custom_skip_desc = (
+                        f"技術三條件成立，但多年財報基本面僅 {fundamental_score:.0f} 分或獲利未過關（防假突破，不寄買進通知）"
+                    )
+        else:
+            # --- Legacy backward-compatible path (used when portfolio_positions is not supplied) ---
+            if current_price > 0 and dynamic_stop_loss > 0 and current_price <= dynamic_stop_loss:
+                trigger_type = "stop_loss"
+                state_label = "觸及停損"
+            elif current_price > 0 and swing_take_profit > 0 and current_price >= swing_take_profit:
+                trigger_type = "take_profit"
+                state_label = "觸及停利"
+            elif broken_ma20_3d:
+                trigger_type = "broken_ma20_exit"
+                state_label = "破月線三日出場"
+            elif advice == "買入" and score >= self.config.min_buy_score:
+                trigger_type = "high_confidence_buy"
+                state_label = "買入"
 
         reasons = _extract_plain_reasons(
             result,
@@ -368,6 +503,7 @@ class AlertStateManager:
             dynamic_stop_loss=dynamic_stop_loss,
             swing_take_profit=swing_take_profit,
             currency=currency,
+            held_metrics=held_metrics,
         )
 
         decision = AlertDecision(
@@ -392,13 +528,20 @@ class AlertStateManager:
             state_label=state_label,
             three_condition_resonance=three_cond_res,
             broken_ma20_3d=broken_ma20_3d,
+            is_held=bool(held_pos is not None),
+            buy_price=float(held_pos.buy_price) if held_pos is not None else 0.0,
+            unrealized_pnl_pct=(
+                held_metrics.get("unrealized_pnl_pct") if held_metrics else None
+            ),
         )
 
         if trigger_type is None:
             decision.should_push = False
             decision.skip_reason_code = "below_threshold"
-            decision.skip_reason_desc = (
-                f"建議為「{advice}」且分數 {score} 分（未達買入≥{self.config.min_buy_score}分，亦未觸及停利/停損線），僅收錄於每日 Markdown 總表"
+            decision.skip_reason_desc = custom_skip_desc or (
+                f"未持倉且建議為「{advice}」分數 {score} 分（未達三條件共振、≥{self.config.min_buy_score}分買入或到價買點），僅收錄總表與網頁"
+                if portfolio_positions is not None
+                else f"建議為「{advice}」且分數 {score} 分（未達買入≥{self.config.min_buy_score}分，亦未觸及停利/停損線），僅收錄於每日 Markdown 總表"
             )
             return decision
 
@@ -444,27 +587,55 @@ class AlertStateManager:
         results: Sequence[Any],
         *,
         reference_date: Optional[date] = None,
+        portfolio_positions: Optional[Dict[str, Any]] = None,
+        watchlist_codes: Optional[Sequence[str]] = None,
     ) -> List[AlertDecision]:
         """
         Evaluate a batch of `AnalysisResult` objects against:
-          1. High-threshold trigger filter (Buy >= 82 OR hit SL/TP)
+          1. Portfolio-aware trigger filter:
+             - Held positions: personalized TP (within 2% / +15% PnL) or SL / 3D-below-MA20 exit alerts
+             - Unheld stocks: buy opportunities only (three_condition_buy / >=82 Buy / buy_zone_touched)
           2. 5-trading-day / 3% move anti-spam cooldown
-          3. Daily Top-3 Buy alert cap (highest confidence scores first)
+          3. Daily Top-3 Buy alert cap (highest confidence scores first; three-cond & held risk exempt or prioritized)
         """
         ref_date = reference_date or datetime.now(ZoneInfo("Asia/Taipei")).date()
-        decisions = [self._build_decision(r, ref_date) for r in (results or [])]
+        watch_set: Optional[set[str]] = None
+        if watchlist_codes is not None:
+            watch_set = set()
+            for w in watchlist_codes:
+                clean = str(w or "").strip().upper()
+                if clean:
+                    watch_set.add(clean)
+                    watch_set.add(clean.split(".")[0])
 
-        # Enforce daily max 3 Buy alerts (highest confidence scores win)
-        buy_candidates = [
-            d for d in decisions if d.should_push and d.trigger_type == "high_confidence_buy"
+        decisions = [
+            self._build_decision(
+                r,
+                ref_date,
+                portfolio_positions=portfolio_positions,
+                watchlist_set=watch_set,
+            )
+            for r in (results or [])
         ]
-        buy_candidates.sort(key=lambda d: (-d.score, d.symbol))
+
+        # Enforce daily max Buy alerts on non-held buy opportunities (three-condition resonance prioritized first)
+        buy_trigger_types = ("high_confidence_buy", "three_condition_buy", "buy_zone_touched")
+        buy_candidates = [
+            d for d in decisions if d.should_push and d.trigger_type in buy_trigger_types
+        ]
+        buy_candidates.sort(
+            key=lambda d: (
+                -(1 if d.trigger_type == "three_condition_buy" else 0),
+                -d.score,
+                d.symbol,
+            )
+        )
         for idx, cand in enumerate(buy_candidates):
             if idx >= self.config.max_daily_buy_alerts:
                 cand.should_push = False
                 cand.skip_reason_code = "daily_buy_cap"
                 cand.skip_reason_desc = (
-                    f"今日高信心買入訊號眾多，已達單日推播上限（分數最高前 {self.config.max_daily_buy_alerts} 檔），本檔收錄於每日 Markdown 總表"
+                    f"今日買進機會眾多，已達單日推播上限（優先挑選前 {self.config.max_daily_buy_alerts} 檔），本檔收錄於每日報告與網頁"
                 )
 
         return decisions
@@ -558,13 +729,21 @@ class AlertStateManager:
 # Curated Traditional Chinese Push Card Formatters (Telegram / Discord)
 # ---------------------------------------------------------------------------
 def format_curated_alert_card(d: AlertDecision) -> str:
-    """Render a beginner-friendly Traditional Chinese alert card for Telegram/Discord."""
-    if d.trigger_type == "stop_loss":
+    """Render a beginner-friendly Traditional Chinese alert card for Telegram/Discord/Gmail."""
+    if d.trigger_type == "portfolio_stop_loss":
+        badge = f"🚨 【我的持股・停損／破線逃命警戒】{d.name} ({d.symbol})"
+    elif d.trigger_type == "portfolio_take_profit":
+        badge = f"🎊 【我的持股・接近上限／停利賣出提醒】{d.name} ({d.symbol})"
+    elif d.trigger_type == "stop_loss":
         badge = f"🚨 【觸及停損警戒】{d.name} ({d.symbol})"
     elif d.trigger_type == "broken_ma20_exit":
         badge = f"🚨 【破20日線三日出場警戒】{d.name} ({d.symbol})"
     elif d.trigger_type == "take_profit":
         badge = f"🎊 【觸及停利目標】{d.name} ({d.symbol})"
+    elif d.trigger_type == "three_condition_buy":
+        badge = f"⚡ 【三條件共振・黃金起漲機會】{d.name} ({d.symbol})"
+    elif d.trigger_type == "buy_zone_touched":
+        badge = f"🎯 【跌入建議買點・到價通知】{d.name} ({d.symbol})"
     elif d.three_condition_resonance:
         badge = f"⚡ 【三條件共振・高信心買入】{d.name} ({d.symbol})"
     else:
@@ -587,14 +766,19 @@ def format_curated_alert_card(d: AlertDecision) -> str:
     lines = [
         f"### {badge}",
         f"- **標的名稱與代號**：**{d.name} ({d.symbol})**",
-        f"- **最終信心分數**：**{d.score} / 100** ｜ 目前建議：**{d.state_label}**（現價 `{d.current_price} {d.currency}`）",
+        f"- **最終信心分數**：**{d.score} / 100** ｜ 目前狀態：**{d.state_label}**（現價 `{d.current_price} {d.currency}`）",
+    ]
+    if d.is_held and d.buy_price > 0:
+        pnl_txt = f"{d.unrealized_pnl_pct:+.2f}%" if isinstance(d.unrealized_pnl_pct, (int, float)) else "N/A"
+        lines.append(f"- **💼 我的買進成本與未實現損益**：買進價 `{d.buy_price} {d.currency}` ｜ 損益 **`{pnl_txt}`**")
+    lines.extend([
         "- **💡 白話買賣理由（重點整理）**：",
         reason_lines,
         f"- **🎯 建議買入區間**：{buy_zone}",
         f"- **🛑 停損價**：**{d.dynamic_stop_loss} {d.currency}**（嚴守 20 日高點減 2.5×ATR 與買入價往下 8% 上限）",
         f"- **🎊 停利目標**：**{d.swing_take_profit} {d.currency}**",
         f"- **💰 新手分批進場資金比例建議**：{d.position_sizing_advice}",
-    ]
+    ])
     return "\n".join(lines)
 
 
@@ -607,17 +791,25 @@ def format_curated_alert_digest(
     """Format pushed curated alert cards into a concise Traditional Chinese IM digest."""
     dt_str = report_date or datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
     pushed = list(pushed_decisions or [])
-    buy_cnt = sum(1 for d in pushed if d.trigger_type == "high_confidence_buy")
-    risk_cnt = sum(1 for d in pushed if d.trigger_type in ("stop_loss", "take_profit", "broken_ma20_exit"))
+    buy_cnt = sum(
+        1 for d in pushed if d.trigger_type in ("high_confidence_buy", "three_condition_buy", "buy_zone_touched")
+    )
+    risk_cnt = sum(
+        1
+        for d in pushed
+        if d.trigger_type in ("stop_loss", "take_profit", "broken_ma20_exit", "portfolio_stop_loss", "portfolio_take_profit")
+    )
     suppressed_cnt = sum(
         1 for d in (all_decisions or []) if not d.should_push
     )
 
     header = [
-        f"# 🎯 {dt_str} 高勝率精選訊號快報（防洗版過濾）",
+        f"# 🎯 {dt_str} 高勝率精選與持股預警快報",
         "",
-        f"> 本日精選推播：**{len(pushed)} 檔**（高信心買入 `{buy_cnt}` 檔 / 停利停損警示 `{risk_cnt}` 檔）"
-        + (f" ｜ 已過濾低勝率或重複雜訊 `{suppressed_cnt}` 檔" if all_decisions else ""),
+        f"> 本日推播：**{len(pushed)} 檔**（精選買點/到價機會 `{buy_cnt}` 檔 / 持股停利停損警示 `{risk_cnt}` 檔）"
+        + (f" ｜ 已過濾未持股雜訊與非目標股 `{suppressed_cnt}` 檔" if all_decisions else ""),
+        "",
+        "👉 **前往視覺化戰情室網頁管理持倉與看圖表**：https://andyhsu-1986.github.io/stock/",
         "",
         "---",
         "",

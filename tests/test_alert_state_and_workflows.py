@@ -39,6 +39,11 @@ def _make_mock_result(
     dynamic_stop_loss: float = 90.0,
     swing_take_profit: float = 115.0,
     risk_notes: list[str] | None = None,
+    fundamental_score: float | None = None,
+    three_condition_resonance: bool = False,
+    broken_ma20_3d: bool = False,
+    eps_ttm: float | None = 5.0,
+    bottom_stabilized: bool = True,
 ) -> AnalysisResult:
     market = "tw" if code.endswith((".TW", ".TWO")) else "us"
     currency = "TWD" if market == "tw" else "USD"
@@ -63,6 +68,16 @@ def _make_mock_result(
         "hard_cap_stop_loss": round(buy_point_1 * 0.92, 2),
         "dynamic_stop_loss": dynamic_stop_loss,
         "swing_take_profit": swing_take_profit,
+        "bottom_stabilized": bottom_stabilized,
+        "three_condition_resonance": three_condition_resonance,
+        "broken_ma20_3d": broken_ma20_3d,
+        "macd_osc": 0.25 if three_condition_resonance else -0.1,
+        "prev_macd_osc": -0.05 if three_condition_resonance else 0.1,
+        "macd_flipped_positive": three_condition_resonance,
+        "bb_expanding": three_condition_resonance,
+        "bb_bandwidth_pct": 8.5,
+        "above_rising_ma20": not broken_ma20_3d,
+        "eps_ttm": eps_ttm,
         "buy_point_2_status": "✅ 止跌確認通過（5日均線走平翻揚且近3日收盤未破底）",
         "position_sizing_advice": (
             "首波試單 30% 資金（於第一買點順勢拉回建立基本部位）➔ "
@@ -72,7 +87,7 @@ def _make_mock_result(
         "revenue_cagr_3y_pct": 18.5,
         "gross_margin_slope_4q": 1.2,
         "operating_cash_flow_ratio_pct": 120.0,
-        "fundamental_score": float(min(100, score)),
+        "fundamental_score": float(fundamental_score if fundamental_score is not None else min(100, score)),
         "technical_score": float(min(100, score)),
         "chip_macro_score": 75.0,
         "risk_notes": risk_notes or [],
@@ -390,8 +405,14 @@ class AlertStateAndWorkflowsTestCase(unittest.TestCase):
             self.assertNotIn("長榮航 (2618.TW)", sent_text)
             self.assertIsNotNone(mgr.get_last_alert("2330.TW"))
 
-        # Verify gitignore permits data/*.parquet, data/alert_state.json, reports/*.md, while ignoring *.db
-        for tracked_path in ("data/tw_daily_history.parquet", "data/alert_state.json", "reports/report_20261117_tw.md"):
+        # Verify gitignore permits data/*.parquet, data/alert_state.json, data/portfolio.json, reports/*.md, while ignoring *.db
+        for tracked_path in (
+            "data/tw_daily_history.parquet",
+            "data/alert_state.json",
+            "data/portfolio.json",
+            "reports/report_20261117_tw.md",
+            "docs/dashboard_data.json",
+        ):
             proc = subprocess.run(
                 ["git", "check-ignore", tracked_path],
                 cwd=str(ROOT_DIR),
@@ -407,6 +428,172 @@ class AlertStateAndWorkflowsTestCase(unittest.TestCase):
             text=True,
         )
         self.assertEqual(proc_db.returncode, 0, "data/stock_analysis.db MUST remain ignored")
+
+    def test_07_portfolio_aware_alerts_buy_zone_touch_and_dashboard_export(self):
+        """
+        Verify:
+        - Unheld stocks NEVER push noisy stop-loss/take-profit alerts
+        - Unheld three-condition stock pushes ONLY when fundamentals >= 55 & EPS > 0
+        - Unheld watchlist/high-fundamental stock touching Buy Point 1 pushes buy_zone_touched
+        - Held positions push portfolio_take_profit (within 2% or >=15% gain) and portfolio_stop_loss
+        - Dashboard JSON + K-line chart export works cleanly and merges TW/US scopes
+        """
+        from utils.alert_state import AlertStateManager
+        from utils.portfolio import (
+            PortfolioManager,
+            PortfolioPosition,
+            compute_chart_series_from_df,
+            export_dashboard_data,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            pm = PortfolioManager(portfolio_path=tmppath / "portfolio.json")
+            pm.upsert_position(
+                PortfolioPosition(symbol="2618.TW", name="長榮航", buy_price=40.0, shares=2000)
+            )
+            pm.upsert_position(
+                PortfolioPosition(symbol="2454.TW", name="聯發科", buy_price=1200.0, shares=500)
+            )
+            pos_map = pm.get_positions_map()
+
+            mgr = AlertStateManager(state_path=tmppath / "alert_state.json")
+
+            results = [
+                # Held 2618.TW: current 49.4 within 2% of TP 50.0 (and +23.5% gain) -> MUST push portfolio_take_profit!
+                _make_mock_result(
+                    "2618.TW", "長榮航", score=72, advice="持有", current_price=49.4,
+                    buy_point_1=46.0, buy_point_2=43.0, dynamic_stop_loss=44.0, swing_take_profit=50.0,
+                ),
+                # Held 2454.TW: current 1110.0 within 1.5% of cost-cap SL (1200 * 0.92 = 1104.0) -> MUST push portfolio_stop_loss!
+                _make_mock_result(
+                    "2454.TW", "聯發科", score=48, advice="持有", current_price=1110.0,
+                    buy_point_1=1150.0, buy_point_2=1080.0, dynamic_stop_loss=1050.0, swing_take_profit=1350.0,
+                ),
+                # Unheld 4533.TWO hitting stop loss -> MUST NOT push noisy SL alert!
+                _make_mock_result(
+                    "4533.TWO", "協易機", score=45, advice="持有", current_price=28.0,
+                    buy_point_1=31.0, buy_point_2=29.0, dynamic_stop_loss=30.0, swing_take_profit=38.0,
+                    broken_ma20_3d=True,
+                ),
+                # Unheld 9904.TW with 3-condition resonance + strong fundamentals -> three_condition_buy!
+                _make_mock_result(
+                    "9904.TW", "寶成", score=74, advice="買入", current_price=26.8,
+                    buy_point_1=25.5, buy_point_2=24.0, dynamic_stop_loss=23.5, swing_take_profit=31.0,
+                    fundamental_score=75.0, three_condition_resonance=True, eps_ttm=4.5,
+                ),
+                # Unheld 9999.TW with 3-condition resonance BUT weak fundamentals (<55) & loss -> MUST NOT push!
+                _make_mock_result(
+                    "9999.TW", "假突破測試", score=68, advice="買入", current_price=20.0,
+                    buy_point_1=19.0, buy_point_2=18.0, dynamic_stop_loss=17.5, swing_take_profit=24.0,
+                    fundamental_score=35.0, three_condition_resonance=True, eps_ttm=-1.2,
+                ),
+                # Unheld watchlist 0050.TW touching Buy Point 1 (91.8 <= 92.2*1.01) & fundamental>=65 -> buy_zone_touched!
+                _make_mock_result(
+                    "0050.TW", "元大台灣50", score=68, advice="持有", current_price=91.8,
+                    buy_point_1=92.2, buy_point_2=88.5, dynamic_stop_loss=84.0, swing_take_profit=105.0,
+                    fundamental_score=72.0,
+                ),
+            ]
+
+            decisions = mgr.evaluate_batch(
+                results,
+                reference_date=date(2026, 11, 17),
+                portfolio_positions=pos_map,
+                watchlist_codes=["0050.TW"],
+            )
+            by_code = {d.symbol: d for d in decisions}
+
+            self.assertTrue(by_code["2618.TW"].should_push)
+            self.assertEqual(by_code["2618.TW"].trigger_type, "portfolio_take_profit")
+            self.assertTrue(by_code["2454.TW"].should_push)
+            self.assertEqual(by_code["2454.TW"].trigger_type, "portfolio_stop_loss")
+
+            self.assertFalse(by_code["4533.TWO"].should_push)
+            self.assertIsNone(by_code["4533.TWO"].trigger_type)
+
+            self.assertTrue(by_code["9904.TW"].should_push)
+            self.assertEqual(by_code["9904.TW"].trigger_type, "three_condition_buy")
+
+            self.assertFalse(by_code["9999.TW"].should_push)
+            self.assertIn("防假突破", by_code["9999.TW"].skip_reason_desc)
+
+            self.assertTrue(by_code["0050.TW"].should_push)
+            self.assertEqual(by_code["0050.TW"].trigger_type, "buy_zone_touched")
+
+            # Verify Chart series & Dashboard export
+            bars = pd.DataFrame(
+                {
+                    "date": [f"2026-09-{i+1:02d}" for i in range(25)],
+                    "open": [25.0 + i * 0.1 for i in range(25)],
+                    "high": [25.5 + i * 0.1 for i in range(25)],
+                    "low": [24.8 + i * 0.1 for i in range(25)],
+                    "close": [25.2 + i * 0.1 for i in range(25)],
+                    "volume": [1500000] * 25,
+                }
+            )
+            series = compute_chart_series_from_df(bars, max_bars=90)
+            self.assertEqual(len(series["dates"]), 25)
+            self.assertEqual(len(series["macd_osc"]), 25)
+
+            dash_path = tmppath / "dashboard_data.json"
+            export_dashboard_data(
+                results,
+                decisions=decisions,
+                chart_map={"9904.TW": series},
+                screener_meta={"9904.TW": {"rank": 1, "total_score": 100.0, "three_cond_match": True}},
+                portfolio_manager=pm,
+                watchlist_codes=["0050.TW"],
+                market_scope="tw",
+                dashboard_path=dash_path,
+            )
+            payload = json.loads(dash_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["summary"]["held_count"], 2)
+            self.assertEqual(payload["summary"]["three_cond_count"], 2)
+            bao = next(x for x in payload["stocks"] if x["symbol"] == "9904.TW")
+            self.assertIn("⚡ 三條件共振黃金起漲", bao["selection_badges"])
+            self.assertEqual(len(bao["chart"]["dates"]), 25)
+            fake = next(x for x in payload["stocks"] if x["symbol"] == "9999.TW")
+            self.assertIn("⚠️ 三條件假突破警戒", fake["selection_badges"])
+
+    def test_08_smart_tier_and_503_circuit_breaker(self):
+        """Verify tiered AI prioritization and Analyzer 503 circuit breaker reordering."""
+        from src.analyzer import GeminiAnalyzer
+        from src.core.pipeline import StockAnalysisPipeline
+        from utils.portfolio import PortfolioManager, PortfolioPosition
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pm = PortfolioManager(portfolio_path=Path(tmpdir) / "portfolio.json")
+            pm.upsert_position(PortfolioPosition(symbol="2330.TW", name="台積電", buy_price=1000.0, shares=100))
+
+            pipe = StockAnalysisPipeline.__new__(StockAnalysisPipeline)
+            pipe.ai_smart_tier_enabled = True
+            pipe.ai_top_screened_n = 5
+            pipe.portfolio_manager = pm
+            pipe.watchlist_codes = ["0050.TW"]
+            pipe.screener_meta = {
+                "9904.TW": {"rank": 8, "three_cond_match": True},
+                "2618.TW": {"rank": 3, "three_cond_match": False},
+                "9998.TW": {"rank": 15, "three_cond_match": False},
+            }
+
+            self.assertTrue(pipe._is_ai_priority_stock("2330.TW", {}))   # Held
+            self.assertTrue(pipe._is_ai_priority_stock("0050.TW", {}))   # Watchlist
+            self.assertTrue(pipe._is_ai_priority_stock("9904.TW", {}))   # 3-Condition Resonance
+            self.assertTrue(pipe._is_ai_priority_stock("2618.TW", {}))   # Top-5 Screened
+            self.assertFalse(pipe._is_ai_priority_stock("9998.TW", {"fundamental_score": 45.0, "current_price": 30.0}))
+
+            analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
+            fast_res = analyzer.analyze_quant_fast(
+                {
+                    "code": "9998.TW",
+                    "stock_name": "測試股",
+                    "quant_evaluation": {"base_confidence_score": 66, "quant_action_advice": "買入", "three_condition_resonance": False},
+                }
+            )
+            self.assertTrue(fast_res.success)
+            self.assertEqual(fast_res.model_used, "quant-engine-v2")
+            self.assertEqual(fast_res.sentiment_score, 66)
 
 
 if __name__ == "__main__":

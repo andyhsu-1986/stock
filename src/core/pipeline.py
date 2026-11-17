@@ -13,6 +13,7 @@ A股自选股智能分析系统 - 核心分析流水线
 
 import logging
 import inspect
+import os
 import threading
 import time
 from pathlib import Path
@@ -249,6 +250,10 @@ class StockAnalysisPipeline:
         daily_market_context_enabled: Optional[bool] = None,
         daily_market_context_allow_generate: bool = True,
         market_scope: str = "all",
+        screener_meta: Optional[Dict[str, Dict[str, Any]]] = None,
+        watchlist_codes: Optional[List[str]] = None,
+        portfolio_manager: Optional[Any] = None,
+        ai_smart_tier_enabled: Optional[bool] = None,
     ):
         """
         初始化调度器
@@ -301,6 +306,27 @@ class StockAnalysisPipeline:
         self._daily_market_context_service_lock = threading.Lock()
         self._concept_rankings_cache_lock = threading.Lock()
         self._concept_rankings_cache: Dict[str, Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]] = {}
+        self._chart_cache_lock = threading.Lock()
+        self._chart_cache: Dict[str, Dict[str, Any]] = {}
+        self.screener_meta: Dict[str, Dict[str, Any]] = {
+            str(k).strip().upper(): dict(v)
+            for k, v in (screener_meta or {}).items()
+            if isinstance(v, dict)
+        }
+        self.watchlist_codes: List[str] = [
+            str(c).strip().upper() for c in (watchlist_codes or []) if str(c).strip()
+        ]
+        self.portfolio_manager = portfolio_manager
+        if ai_smart_tier_enabled is None:
+            self.ai_smart_tier_enabled = (
+                os.getenv("AI_SMART_TIER_ENABLED", "false").strip().lower() == "true"
+            )
+        else:
+            self.ai_smart_tier_enabled = bool(ai_smart_tier_enabled)
+        try:
+            self.ai_top_screened_n = max(1, int(os.getenv("AI_TOP_SCREENED_N", "5") or 5))
+        except (TypeError, ValueError):
+            self.ai_top_screened_n = 5
         self._last_local_report_path: Optional[str] = None
         self._last_local_report_error: Optional[str] = None
         
@@ -650,7 +676,7 @@ class StockAnalysisPipeline:
                 _mkt = get_market_for_stock(normalize_stock_code(code))
                 frozen = get_frozen_target_date()
                 end_date = frozen if frozen else get_market_now(_mkt).date()
-                start_date = end_date - timedelta(days=89)  # ~60 trading days for MA60
+                start_date = end_date - timedelta(days=150)  # ~95-100 trading days for MACD & interactive chart
                 historical_bars = self.db.get_data_range(code, start_date, end_date)
                 if historical_bars:
                     df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
@@ -685,7 +711,111 @@ class StockAnalysisPipeline:
                     analysis_target=analysis_target,
                 )
 
-            # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
+            # Step 5: 获取分析上下文（技术面数据）
+            self._emit_progress(46, f"{stock_name}：正在整理分析上下文與雙軌量化算價")
+            context = self._get_analysis_context_with_market_fallback(
+                code, analysis_target=analysis_target
+            )
+
+            if context is None:
+                logger.warning(f"{stock_name}({code}) 无法获取历史行情数据，将仅基于新闻和实时行情分析")
+                _mkt_date = get_market_now(
+                    get_market_for_stock(normalize_stock_code(code))
+                ).date()
+                context = {
+                    'code': code,
+                    'stock_name': stock_name,
+                    'date': _mkt_date.isoformat(),
+                    'data_missing': True,
+                    'today': {},
+                    'yesterday': {}
+                }
+            
+            # Step 6: 增强上下文数据（添加实时行情、筹码、趋势分析结果、股票名称）
+            enhanced_context = self._enhance_context(
+                context, 
+                realtime_quote, 
+                chip_data,
+                trend_result,
+                stock_name,  # 传入股票名称
+                fundamental_context,
+                market_phase_context=market_phase_context_dict,
+                portfolio_context=portfolio_context,
+            )
+            enhanced_context["market_phase_context"] = market_phase_context_dict
+            self._attach_daily_market_context(
+                enhanced_context,
+                daily_market_context,
+                report_language=report_language,
+            )
+            if portfolio_context is not None:
+                enhanced_context["portfolio_context"] = dict(portfolio_context)
+            if isinstance(market_structure_context, dict):
+                enhanced_context["market_structure_context"] = market_structure_context
+
+            # Step 6.5: 執行台美股雙軌量化算價與財報趨勢引擎 (engine/quant_evaluator.py) + 圖表K線序列擷取
+            bars_df = df if "df" in locals() and isinstance(df, pd.DataFrame) else None
+            try:
+                from engine.quant_evaluator import QuantEvaluator
+
+                qe = getattr(self, "quant_evaluator", None) or QuantEvaluator()
+                inst_block = (
+                    fundamental_context.get("institution", {})
+                    if isinstance(fundamental_context, dict)
+                    else {}
+                )
+                inst_net = (
+                    inst_block.get("data")
+                    if isinstance(inst_block, dict) and inst_block.get("status") == "ok"
+                    else None
+                )
+                quant_eval = qe.evaluate(
+                    code,
+                    name=stock_name,
+                    daily_df=bars_df,
+                    institutional_net=inst_net,
+                )
+                enhanced_context["quant_evaluation"] = quant_eval.to_dict()
+                logger.info(
+                    "%s(%s) 雙軌量化算價完成: 第一買點=%s, 第二買點=%s, 動態停損=%s, 基礎信心分數=%d (%s)",
+                    stock_name,
+                    code,
+                    quant_eval.buy_point_1,
+                    quant_eval.buy_point_2,
+                    quant_eval.dynamic_stop_loss,
+                    quant_eval.base_confidence_score,
+                    quant_eval.quant_action_advice,
+                )
+            except Exception as exc:
+                logger.warning("%s(%s) 雙軌量化算價引擎異常 (Fail-Open): %s", stock_name, code, exc)
+
+            # Capture interactive chart series for GitHub Pages dashboard (`docs/dashboard_data.json`)
+            try:
+                from utils.portfolio import compute_chart_series_from_df
+
+                chart_bars_df = bars_df
+                if (chart_bars_df is None or len(chart_bars_df) < 35) and str(code).upper().endswith((".TW", ".TWO")):
+                    try:
+                        from screener.tw_market_screener import TWMarketScreener
+
+                        pq_path = TWMarketScreener().parquet_path
+                        if pq_path.exists():
+                            pq_df = pd.read_parquet(pq_path)
+                            sub_df = pq_df[pq_df["symbol"].astype(str).str.upper() == str(code).strip().upper()]
+                            if not sub_df.empty and (chart_bars_df is None or len(sub_df) > len(chart_bars_df)):
+                                chart_bars_df = sub_df
+                    except Exception:
+                        pass
+                series = compute_chart_series_from_df(chart_bars_df, max_bars=90)
+                if series and series.get("dates"):
+                    with self._chart_cache_lock:
+                        self._chart_cache[str(code).strip().upper()] = series
+            except Exception as exc:
+                logger.debug("%s(%s) 擷取互動圖表 K 線序列略過: %s", stock_name, code, exc)
+
+            run_deep_ai = self._is_ai_priority_stock(code, enhanced_context.get("quant_evaluation"))
+
+            # Step 4: 多维度情报搜索（僅對持倉、觀察名單、三條件共振與前段高優先標的執行，大幅加快雲端速度）
             news_context = None
             persisted_intelligence_context = self._load_persisted_intelligence_context(
                 code=code,
@@ -693,8 +823,15 @@ class StockAnalysisPipeline:
                 market=market or "cn",
             )
             news_result_count: Optional[int] = None
-            self._emit_progress(46, f"{stock_name}：正在检索新闻与舆情")
-            if self.search_service is not None and self.search_service.is_available:
+            self._emit_progress(55, f"{stock_name}：正在{'檢索新聞與輿情' if run_deep_ai else '套用量化速評'}")
+            if not run_deep_ai:
+                logger.info(
+                    "%s(%s) 非前 %d 強且未觸發三條件共振／未在持倉觀察名單，啟用智慧分層快速量化評估（略過耗時新聞與長文LLM）",
+                    stock_name,
+                    code,
+                    getattr(self, "ai_top_screened_n", 5),
+                )
+            elif self.search_service is not None and self.search_service.is_available:
                 logger.info(f"{stock_name}({code}) 开始多维度情报搜索...")
 
                 # 检索已发起：此后即使一条都没拿到，也是「执行了但零命中」而非
@@ -739,9 +876,9 @@ class StockAnalysisPipeline:
             else:
                 logger.info(f"{stock_name}({code}) 搜索服务不可用，跳过情报搜索")
 
-            # Step 4.5: Social sentiment intelligence (US stocks only)
+            # Step 4.5: Social sentiment intelligence (US stocks only, deep AI targets only)
             social_evidence_context: Optional[str] = None
-            if self.social_sentiment_service is not None and self.social_sentiment_service.is_available and is_us_stock_code(code):
+            if run_deep_ai and self.search_service is not None and self.social_sentiment_service is not None and self.social_sentiment_service.is_available and is_us_stock_code(code):
                 try:
                     social_context = self.social_sentiment_service.get_social_context(code)
                     if social_context:
@@ -760,84 +897,6 @@ class StockAnalysisPipeline:
                     if news_context
                     else persisted_intelligence_context
                 )
-
-            # Step 5: 获取分析上下文（技术面数据）
-            self._emit_progress(58, f"{stock_name}：正在整理分析上下文")
-            context = self._get_analysis_context_with_market_fallback(
-                code, analysis_target=analysis_target
-            )
-
-            if context is None:
-                logger.warning(f"{stock_name}({code}) 无法获取历史行情数据，将仅基于新闻和实时行情分析")
-                _mkt_date = get_market_now(
-                    get_market_for_stock(normalize_stock_code(code))
-                ).date()
-                context = {
-                    'code': code,
-                    'stock_name': stock_name,
-                    'date': _mkt_date.isoformat(),
-                    'data_missing': True,
-                    'today': {},
-                    'yesterday': {}
-                }
-            
-            # Step 6: 增强上下文数据（添加实时行情、筹码、趋势分析结果、股票名称）
-            enhanced_context = self._enhance_context(
-                context, 
-                realtime_quote, 
-                chip_data,
-                trend_result,
-                stock_name,  # 传入股票名称
-                fundamental_context,
-                market_phase_context=market_phase_context_dict,
-                portfolio_context=portfolio_context,
-            )
-            enhanced_context["market_phase_context"] = market_phase_context_dict
-            self._attach_daily_market_context(
-                enhanced_context,
-                daily_market_context,
-                report_language=report_language,
-            )
-            if portfolio_context is not None:
-                enhanced_context["portfolio_context"] = dict(portfolio_context)
-            if isinstance(market_structure_context, dict):
-                enhanced_context["market_structure_context"] = market_structure_context
-
-            # Step 6.5: 執行台美股雙軌量化算價與財報趨勢引擎 (engine/quant_evaluator.py)
-            try:
-                from engine.quant_evaluator import QuantEvaluator
-
-                qe = getattr(self, "quant_evaluator", None) or QuantEvaluator()
-                inst_block = (
-                    fundamental_context.get("institution", {})
-                    if isinstance(fundamental_context, dict)
-                    else {}
-                )
-                inst_net = (
-                    inst_block.get("data")
-                    if isinstance(inst_block, dict) and inst_block.get("status") == "ok"
-                    else None
-                )
-                bars_df = df if "df" in locals() and isinstance(df, pd.DataFrame) else None
-                quant_eval = qe.evaluate(
-                    code,
-                    name=stock_name,
-                    daily_df=bars_df,
-                    institutional_net=inst_net,
-                )
-                enhanced_context["quant_evaluation"] = quant_eval.to_dict()
-                logger.info(
-                    "%s(%s) 雙軌量化算價完成: 第一買點=%s, 第二買點=%s, 動態停損=%s, 基礎信心分數=%d (%s)",
-                    stock_name,
-                    code,
-                    quant_eval.buy_point_1,
-                    quant_eval.buy_point_2,
-                    quant_eval.dynamic_stop_loss,
-                    quant_eval.base_confidence_score,
-                    quant_eval.quant_action_advice,
-                )
-            except Exception as exc:
-                logger.warning("%s(%s) 雙軌量化算價引擎異常 (Fail-Open): %s", stock_name, code, exc)
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             (
@@ -876,49 +935,51 @@ class StockAnalysisPipeline:
                     f"{stock_name}：LLM 正在生成分析结果（已接收 {chars_received} 字符）",
                 )
 
-            self._emit_progress(64, f"{stock_name}：正在请求 LLM 生成报告")
+            self._emit_progress(64, f"{stock_name}：正在{'請求 LLM 生成報告' if run_deep_ai else '組裝量化結構化報告'}")
             llm_started_at = time.monotonic()
             try:
-                record_llm_run_started(
-                    model=getattr(self.config, "litellm_model", None),
-                    call_type="analysis",
-                )
-                result = self.analyzer.analyze(
-                    enhanced_context,
-                    news_context=news_context,
-                    progress_callback=self._emit_progress,
-                    stream_progress_callback=_on_llm_stream,
-                    analysis_context_pack_summary=analysis_context_pack_summary,
-                )
-                llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
-                if result is not None:
-                    # 交给展示层区分「未配置渠道」「检索零命中」和「正常命中」。
-                    # 该值此前只进了诊断快照，报告层拿不到。
-                    result.news_result_count = news_result_count
-                    # 三路来源逐个登记，不看拼好的 news_context 整段：
-                    # format_intel_report() 零命中时仍输出占位文本，整段永远非空，
-                    # 拿它判定会把「搜了但一条没拿到」误判成有证据。
-                    result.news_evidence_present = news_evidence_present(
-                        news_result_count,
-                        social_evidence_context,
-                        persisted_intelligence_context,
+                if not run_deep_ai and hasattr(self.analyzer, "analyze_quant_fast"):
+                    result = self.analyzer.analyze_quant_fast(
+                        enhanced_context,
+                        report_language=report_language,
                     )
-                record_llm_run(
-                    success=bool(result and getattr(result, "success", True)),
-                    model=getattr(result, "model_used", None) if result else None,
-                    call_type="analysis",
-                    duration_ms=llm_duration_ms,
-                    error_type=(
-                        None
-                        if result and getattr(result, "success", True)
-                        else "AnalysisResultError"
-                    ),
-                    error_message=(
-                        getattr(result, "error_message", None)
-                        if result and not getattr(result, "success", True)
-                        else ("LLM returned empty result" if result is None else None)
-                    ),
-                )
+                    llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
+                else:
+                    record_llm_run_started(
+                        model=getattr(self.config, "litellm_model", None),
+                        call_type="analysis",
+                    )
+                    result = self.analyzer.analyze(
+                        enhanced_context,
+                        news_context=news_context,
+                        progress_callback=self._emit_progress,
+                        stream_progress_callback=_on_llm_stream,
+                        analysis_context_pack_summary=analysis_context_pack_summary,
+                    )
+                    llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
+                    if result is not None:
+                        result.news_result_count = news_result_count
+                        result.news_evidence_present = news_evidence_present(
+                            news_result_count,
+                            social_evidence_context,
+                            persisted_intelligence_context,
+                        )
+                    record_llm_run(
+                        success=bool(result and getattr(result, "success", True)),
+                        model=getattr(result, "model_used", None) if result else None,
+                        call_type="analysis",
+                        duration_ms=llm_duration_ms,
+                        error_type=(
+                            None
+                            if result and getattr(result, "success", True)
+                            else "AnalysisResultError"
+                        ),
+                        error_message=(
+                            getattr(result, "error_message", None)
+                            if result and not getattr(result, "success", True)
+                            else ("LLM returned empty result" if result is None else None)
+                        ),
+                    )
             except Exception as exc:
                 record_llm_run(
                     success=False,
@@ -1042,6 +1103,60 @@ class StockAnalysisPipeline:
             logger.exception(f"{stock_name}({code}) 详细错误信息:")
             return None
     
+    def _is_ai_priority_stock(
+        self,
+        code: str,
+        quant_eval: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Smart tiered AI filter: when `ai_smart_tier_enabled` is True, run deep web-news + LLM
+        for held portfolio positions, fixed watchlist, XQ three-condition resonance targets,
+        Top-N screened stocks, and high-fundamental buy-zone opportunities.
+        """
+        if not getattr(self, "ai_smart_tier_enabled", False):
+            return True
+
+        clean = str(code or "").strip().upper()
+        bare = clean.split(".")[0]
+
+        pm = getattr(self, "portfolio_manager", None)
+        if pm is not None:
+            pos_map = pm.get_positions_map()
+            if clean in pos_map or bare in pos_map:
+                return True
+            pm_watch = {w.split(".")[0] for w in pm.get_watchlist_symbols()} | set(pm.get_watchlist_symbols())
+            if clean in pm_watch or bare in pm_watch:
+                return True
+
+        watch_set = set(getattr(self, "watchlist_codes", []) or [])
+        watch_bare = {w.split(".")[0] for w in watch_set}
+        if clean in watch_set or bare in watch_bare:
+            return True
+
+        scr_map = getattr(self, "screener_meta", {}) or {}
+        meta = scr_map.get(clean) or scr_map.get(bare)
+        if isinstance(meta, dict):
+            if meta.get("three_cond_match"):
+                return True
+            rank = int(meta.get("rank") or 999)
+            if rank <= int(getattr(self, "ai_top_screened_n", 5) or 5):
+                return True
+
+        if isinstance(quant_eval, dict):
+            if quant_eval.get("three_condition_resonance"):
+                return True
+            f_score = float(quant_eval.get("fundamental_score") or 0.0)
+            cp = float(quant_eval.get("current_price") or 0.0)
+            bp1 = float(quant_eval.get("buy_point_1") or 0.0)
+            bp2 = float(quant_eval.get("buy_point_2") or 0.0)
+            if f_score >= 65.0 and cp > 0 and (
+                (bp1 > 0 and cp <= bp1 * 1.01)
+                or (bp2 > 0 and cp <= bp2 * 1.02)
+            ):
+                return True
+
+        return False
+
     def _enhance_context(
         self,
         context: Dict[str, Any],
@@ -3713,13 +3828,24 @@ class StockAnalysisPipeline:
         logger.info("===== 分析完成 =====")
         logger.info(f"成功: {success_count}, 失败: {fail_count}, 耗时: {elapsed_time:.2f} 秒")
         
-        # 執行防洗版高門檻精選評估並紀錄每日觀察快照（寫入 data/alert_state.json 供週報追蹤）
+        # 執行持倉連動與高門檻防洗版評估、紀錄快照並匯出 GitHub Pages 戰情室網頁 JSON
         alert_decisions: List[Any] = []
         alert_manager = None
+        pm = None
+        all_watch: List[str] = []
         if results and not dry_run:
             try:
                 from zoneinfo import ZoneInfo
                 from utils.alert_state import AlertFilterConfig, AlertStateManager
+                from utils.portfolio import PortfolioManager, export_dashboard_data
+
+                pm = getattr(self, "portfolio_manager", None) or PortfolioManager()
+                positions_map = pm.get_positions_map()
+                all_watch = list(dict.fromkeys(
+                    list(getattr(self, "watchlist_codes", []) or [])
+                    + list(getattr(self.config, "stock_list", []) or [])
+                    + pm.get_watchlist_symbols()
+                ))
 
                 alert_cfg = AlertFilterConfig(
                     min_buy_score=int(getattr(self.config, "alert_min_buy_score", 82) or 82),
@@ -3731,10 +3857,25 @@ class StockAnalysisPipeline:
                 )
                 alert_manager = AlertStateManager(config=alert_cfg)
                 tw_ref_date = datetime.now(ZoneInfo("Asia/Taipei")).date()
-                alert_decisions = alert_manager.evaluate_batch(results, reference_date=tw_ref_date)
+                alert_decisions = alert_manager.evaluate_batch(
+                    results,
+                    reference_date=tw_ref_date,
+                    portfolio_positions=positions_map,
+                    watchlist_codes=all_watch,
+                )
                 alert_manager.record_daily_snapshots(results, alert_decisions, reference_date=tw_ref_date)
+
+                export_dashboard_data(
+                    results,
+                    decisions=alert_decisions,
+                    chart_map=getattr(self, "_chart_cache", None),
+                    screener_meta=getattr(self, "screener_meta", None),
+                    portfolio_manager=pm,
+                    watchlist_codes=all_watch,
+                    market_scope=getattr(self, "market_scope", "all"),
+                )
             except Exception as exc:
-                logger.warning("[AlertState] 防洗版狀態評估失敗 (Fail-Open): %s", exc)
+                logger.warning("[AlertState/Dashboard] 防洗版狀態評估或網頁匯出失敗 (Fail-Open): %s", exc)
 
         # 保存报告到本地文件（无论是否推送通知都保存）
         if results and not dry_run:

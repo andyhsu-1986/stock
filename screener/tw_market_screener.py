@@ -361,6 +361,31 @@ class TWMarketScreener:
         if not isinstance(quotes_raw, list) or not quotes_raw:
             return pd.DataFrame(columns=PARQUET_COLUMNS)
 
+        sample_date_iso = minguo_or_ad_to_iso_date(quotes_raw[0].get("Date"))
+
+        # Check if TWSE OpenAPI still lags behind Taipei today (common between 14:30-16:30 TW time).
+        # If today's RWD MI_INDEX already published, prefer MI_INDEX so TWSE aligns with TPEx!
+        today_tw = _taipei_today()
+        now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
+        if (
+            sample_date_iso
+            and sample_date_iso < today_tw.strftime("%Y-%m-%d")
+            and today_tw.weekday() < 5
+            and (now_tw.hour > 14 or (now_tw.hour == 14 and now_tw.minute >= 35))
+        ):
+            try:
+                mi_df = self._fetch_twse_historical_date(today_tw)
+                if not mi_df.empty and len(mi_df) >= 500:
+                    logger.info(
+                        "[TWMarketScreener] TWSE OpenAPI 仍為 %s，已改用 MI_INDEX 取得今日 (%s) 上市行情 %d 檔",
+                        sample_date_iso,
+                        today_tw.strftime("%Y-%m-%d"),
+                        len(mi_df),
+                    )
+                    return mi_df
+            except Exception as exc:
+                logger.debug("[TWMarketScreener] TWSE MI_INDEX 今日備援略過: %s", exc)
+
         # Parse valuation map {code: (pe, dy, pb)}
         val_map: Dict[str, Tuple[float, float, float]] = {}
         try:
@@ -377,8 +402,6 @@ class TWMarketScreener:
         except Exception as exc:
             logger.warning("[TWMarketScreener] TWSE BWIBBU_ALL 估值抓取失敗 (Fail-Open): %s", exc)
 
-        #Detect trading date from quotes
-        sample_date_iso = minguo_or_ad_to_iso_date(quotes_raw[0].get("Date"))
         ad_date_compact = sample_date_iso.replace("-", "") if sample_date_iso else None
 
         # Parse institutional map {code: (foreign, trust, dealer, total)}
@@ -855,6 +878,11 @@ class TWMarketScreener:
 
         df = df.sort_values(["symbol", "date"]).reset_index(drop=True)
         latest_market_date = str(df["date"].max())
+        latest_date_by_market: Dict[str, str] = {}
+        if "market" in df.columns:
+            latest_date_by_market = (
+                df.groupby("market")["date"].max().astype(str).to_dict()
+            )
 
         from engine.quant_evaluator import compute_xq_three_conditions
 
@@ -862,8 +890,10 @@ class TWMarketScreener:
         for symbol, grp in df.groupby("symbol", sort=False):
             tail = grp.tail(120)
             last_row = tail.iloc[-1]
-            # Must be active on the latest market date
-            if str(last_row["date"]) != latest_market_date:
+            # Must be active on its exchange's latest trading date (handles TWSE vs TPEx update lag)
+            row_market = str(last_row.get("market") or "").strip().upper()
+            expected_date = latest_date_by_market.get(row_market, latest_market_date)
+            if str(last_row["date"]) != expected_date:
                 continue
 
             code_str = str(last_row["code"]).strip().upper()
@@ -1040,7 +1070,7 @@ class TWMarketScreener:
 
             records.append(
                 {
-                    "date": latest_market_date,
+                    "date": str(last_row["date"]),
                     "symbol": str(symbol),
                     "code": str(last_row["code"]),
                     "name": str(last_row["name"]),

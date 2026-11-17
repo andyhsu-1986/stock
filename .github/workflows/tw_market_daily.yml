@@ -120,6 +120,8 @@ jobs:
           MAX_WORKERS: ${{ vars.MAX_WORKERS || '5' }}
           GEMINI_REQUEST_DELAY: ${{ vars.GEMINI_REQUEST_DELAY || '0.5' }}
           GEMINI_MAX_RETRIES: ${{ vars.GEMINI_MAX_RETRIES || '2' }}
+          AI_SMART_TIER_ENABLED: ${{ vars.AI_SMART_TIER_ENABLED || 'true' }}
+          AI_TOP_SCREENED_N: ${{ vars.AI_TOP_SCREENED_N || '5' }}
           LOG_LEVEL: 'INFO'
         run: |
           if [ -n "${STOCK_LIST_CONFIG:-}" ]; then
@@ -181,7 +183,7 @@ jobs:
 
           shopt -s nullglob
           FILES_TO_ADD=()
-          for f in data/*.parquet data/alert_state.json reports/*.md; do
+          for f in data/*.parquet data/alert_state.json data/portfolio.json docs/dashboard_data.json reports/*.md; do
             [ -e "$f" ] && FILES_TO_ADD+=("$f")
           done
           if [ "${#FILES_TO_ADD[@]}" -gt 0 ]; then
