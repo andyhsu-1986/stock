@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-11-24T02:45:27+08:00",
+  "updated_at": "2026-11-25T02:19:45+08:00",
   "alerts": {
     "00878.TW": {
       "symbol": "00878.TW",
@@ -1889,6 +1889,280 @@
         "risk_notes": [
           "近 4 季毛利率變化斜率為負 (-91.49%/季)，需留意毛利壓縮",
           "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 85.26 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      }
+    },
+    "2026-11-25": {
+      "9933.TW": {
+        "date": "2026-11-25",
+        "symbol": "9933.TW",
+        "name": "CTCI CORP",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 54.0,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 59,
+        "buy_point_1": 49.47,
+        "buy_point_2": 47.49,
+        "dynamic_stop_loss": 47.7,
+        "swing_take_profit": 66.26,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 47.49 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 47.49 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "3023.TW": {
+        "date": "2026-11-25",
+        "symbol": "3023.TW",
+        "name": "SINBON ELECTRONICS CO LTD",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 278.0,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 59,
+        "buy_point_1": 261.88,
+        "buy_point_2": 251.4,
+        "dynamic_stop_loss": 262.9,
+        "swing_take_profit": 327.06,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 251.4 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 251.4 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "3714.TW": {
+        "date": "2026-11-25",
+        "symbol": "3714.TW",
+        "name": "ENNOSTAR INC",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 73.1,
+        "advice": "賣出",
+        "state_label": "賣出",
+        "score": 40,
+        "buy_point_1": 68.26,
+        "buy_point_2": 65.53,
+        "dynamic_stop_loss": 104.74,
+        "swing_take_profit": 130.5,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（5日均線仍下彎 (79.28➔75.52)、近3日收盤價仍在破底），第二買點 65.53 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "🚨 觸發破線三日出場：個股已連續 3 個交易日收盤跌破 20 日均線 (98.66 TWD) 站不回，依策略出場紀律建議果斷減碼或出場",
+          "⚠️ 尚未完成止跌確認（5日均線仍下彎 (79.28➔75.52)、近3日收盤價仍在破底），第二買點 65.53 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "8415.TWO": {
+        "date": "2026-11-25",
+        "symbol": "8415.TWO",
+        "name": "BRIGHTON-BEST INTERNATION (TAIW",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 42.1,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 59,
+        "buy_point_1": 37.95,
+        "buy_point_2": 36.43,
+        "dynamic_stop_loss": 37.27,
+        "swing_take_profit": 49.65,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 36.43 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 36.43 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "3661.TW": {
+        "date": "2026-11-25",
+        "symbol": "3661.TW",
+        "name": "ALCHIP TECHNOLOGIES LIMITD",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 3915.0,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 56,
+        "buy_point_1": 3469.25,
+        "buy_point_2": 3330.48,
+        "dynamic_stop_loss": 3191.71,
+        "swing_take_profit": 4983.92,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（5日均線仍下彎 (3609.0➔3589.0)、近3日收盤價仍在破底），第二買點 3330.48 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "近 4 季毛利率變化斜率為負 (-8.80%/季)，需留意毛利壓縮",
+          "⚠️ 尚未完成止跌確認（5日均線仍下彎 (3609.0➔3589.0)、近3日收盤價仍在破底），第二買點 3330.48 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "6199.TWO": {
+        "date": "2026-11-25",
+        "symbol": "6199.TWO",
+        "name": "TIENPIN UNITED ENTERPRISE CO LT",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 173.0,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 59,
+        "buy_point_1": 165.7,
+        "buy_point_2": 159.07,
+        "dynamic_stop_loss": 164.9,
+        "swing_take_profit": 183.42,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 159.07 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "近 4 季毛利率變化斜率為負 (-5.86%/季)，需留意毛利壓縮",
+          "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 159.07 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "7765.TW": {
+        "date": "2026-11-25",
+        "symbol": "7765.TW",
+        "name": "CHT SECURITY CO LTD",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 283.0,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 59,
+        "buy_point_1": 253.3,
+        "buy_point_2": 238.98,
+        "dynamic_stop_loss": 240.22,
+        "swing_take_profit": 341.13,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（5日均線仍下彎 (281.7➔276.5)），第二買點 238.98 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "近 4 季毛利率變化斜率為負 (-2.18%/季)，需留意毛利壓縮",
+          "⚠️ 尚未完成止跌確認（5日均線仍下彎 (281.7➔276.5)），第二買點 238.98 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "2468.TW": {
+        "date": "2026-11-25",
+        "symbol": "2468.TW",
+        "name": "FORTUNE INFORMATION SYSTEMS COR",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 66.4,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 57,
+        "buy_point_1": 56.25,
+        "buy_point_2": 41.52,
+        "dynamic_stop_loss": 58.4,
+        "swing_take_profit": 96.32,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（5日均線仍下彎 (70.66➔67.32)），第二買點 41.52 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "目前本益比 (50.81) 高於 5 年高位區間 (34.94)，追價風險較高",
+          "⚠️ 尚未完成止跌確認（5日均線仍下彎 (70.66➔67.32)），第二買點 41.52 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "5522.TW": {
+        "date": "2026-11-25",
+        "symbol": "5522.TW",
+        "name": "FARGLORY LAND DEVELOPMENT CO. L",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 63.6,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 59,
+        "buy_point_1": 60.19,
+        "buy_point_2": 57.78,
+        "dynamic_stop_loss": 59.0,
+        "swing_take_profit": 70.52,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 57.78 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "近 4 季毛利率變化斜率為負 (-1.28%/季)，需留意毛利壓縮",
+          "⚠️ 尚未完成止跌確認（近3日收盤價仍在破底），第二買點 57.78 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "2471.TW": {
+        "date": "2026-11-25",
+        "symbol": "2471.TW",
+        "name": "ARES INTERNATIONAL (TAIWAN)",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 60.6,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 59,
+        "buy_point_1": 57.69,
+        "buy_point_2": 55.38,
+        "dynamic_stop_loss": 56.8,
+        "swing_take_profit": 91.04,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（5日均線仍下彎 (66.38➔62.58)），第二買點 55.38 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "⚠️ 尚未完成止跌確認（5日均線仍下彎 (66.38➔62.58)），第二買點 55.38 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "2474.TW": {
+        "date": "2026-11-25",
+        "symbol": "2474.TW",
+        "name": "CATCHER TECHNOLOGY",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 206.0,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 50,
+        "buy_point_1": 179.45,
+        "buy_point_2": 166.55,
+        "dynamic_stop_loss": 188.15,
+        "swing_take_profit": 220.71,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（5日均線仍下彎 (197.1➔196.1)、近3日收盤價仍在破底），第二買點 166.55 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "近 4 季毛利率變化斜率為負 (-3.29%/季)，需留意毛利壓縮",
+          "⚠️ 尚未完成止跌確認（5日均線仍下彎 (197.1➔196.1)、近3日收盤價仍在破底），第二買點 166.55 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
+        ],
+        "trigger_type": null,
+        "alert_pushed": false,
+        "skip_reason_code": "below_threshold"
+      },
+      "6148.TWO": {
+        "date": "2026-11-25",
+        "symbol": "6148.TWO",
+        "name": "AZION CORPORATION",
+        "market": "tw",
+        "currency": "TWD",
+        "current_price": 50.9,
+        "advice": "持有",
+        "state_label": "持有",
+        "score": 59,
+        "buy_point_1": 41.23,
+        "buy_point_2": 29.01,
+        "dynamic_stop_loss": 47.6,
+        "swing_take_profit": 77.68,
+        "buy_point_2_status": "⚠️ 尚未完成止跌確認（5日均線仍下彎 (55.03➔52.05)、近3日收盤價仍在破底），第二買點 29.01 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接",
+        "risk_notes": [
+          "目前本益比 (43.97) 高於 5 年高位區間 (32.56)，追價風險較高",
+          "⚠️ 尚未完成止跌確認（5日均線仍下彎 (55.03➔52.05)、近3日收盤價仍在破底），第二買點 29.01 TWD 暫勿過早接刀，須待 5 日均線走平翻揚且近 3 日收盤未破底後再行承接"
         ],
         "trigger_type": null,
         "alert_pushed": false,
